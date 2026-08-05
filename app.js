@@ -900,18 +900,19 @@ function openMeetingModal(meetingId, presetClientId, onSaved) {
 }
 
 // ---------- ENVIO WHATSAPP ----------
+// obs: WhatsApp usa *asterisco* pra deixar o texto em negrito
 function buildMessage(charge, client) {
   const settings = getSettings();
   const empresa = settings.empresaNome ? settings.empresaNome : '';
   const status = chargeStatus(charge);
-  const linhaAtraso = status === 'atrasado' ? `\nEssa cobrança está em atraso desde ${formatDateBR(charge.vencimento)}.` : '';
-  const linhaPix = settings.pix ? `\nChave PIX: ${settings.pix}` : '';
-  return `Olá, ${client.nome}! ${empresa ? 'Aqui é da ' + empresa + '.' : ''}` +
-    `\nSegue sua cobrança referente a: ${charge.descricao}` +
-    `\nValor: ${formatCurrency(charge.valor)}` +
-    `\nVencimento: ${formatDateBR(charge.vencimento)}` +
+  const linhaAtraso = status === 'atrasado' ? `\n⚠️ Essa cobrança está em atraso desde *${formatDateBR(charge.vencimento)}*.` : '';
+  const linhaPix = settings.pix ? `\n💳 Chave PIX: *${settings.pix}*` : '';
+  return `👋 Olá, *${client.nome}*! ${empresa ? 'Aqui é da *' + empresa + '*.' : ''}` +
+    `\n\n🧾 Segue sua cobrança referente a: *${charge.descricao}*` +
+    `\n💰 Valor: *${formatCurrency(charge.valor)}*` +
+    `\n📅 Vencimento: *${formatDateBR(charge.vencimento)}*` +
     `${linhaAtraso}${linhaPix}` +
-    `\n\nQualquer dúvida, é só chamar por aqui. Obrigado!`;
+    `\n\n🙏 Qualquer dúvida, é só chamar por aqui. Obrigado!`;
 }
 
 function openWhatsappModal(chargeId) {
@@ -924,11 +925,11 @@ function openWhatsappModal(chargeId) {
 function buildMeetingMessage(meeting, client) {
   const settings = getSettings();
   const empresa = settings.empresaNome ? settings.empresaNome : '';
-  return `Olá, ${client.nome}! ${empresa ? 'Aqui é da ' + empresa + '.' : ''}` +
-    `\nPassando pra lembrar da nossa reunião: ${meeting.titulo}` +
-    `\nData: ${formatDateBR(meeting.data)}${meeting.hora ? ' às ' + meeting.hora : ''}` +
-    `${meeting.local ? '\nLocal/link: ' + meeting.local : ''}` +
-    `\n\nQualquer imprevisto, me avisa por aqui. Até lá!`;
+  return `👋 Olá, *${client.nome}*! ${empresa ? 'Aqui é da *' + empresa + '*.' : ''}` +
+    `\n\n🗓️ Passando pra lembrar da nossa reunião: *${meeting.titulo}*` +
+    `\n📅 Data: *${formatDateBR(meeting.data)}${meeting.hora ? ' às ' + meeting.hora : ''}*` +
+    `${meeting.local ? '\n📍 Local/link: ' + meeting.local : ''}` +
+    `\n\n😊 Qualquer imprevisto, me avisa por aqui. Até lá!`;
 }
 
 function openMeetingWhatsappModal(meetingId) {
