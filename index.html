@@ -16,41 +16,56 @@
     <div class="lock-card">
       <div class="stamp-mark">CA</div>
       <h1 class="lock-title">Caixa Aberto</h1>
-      <p class="lock-sub" id="lockSubtitle">Crie uma senha para abrir seu livro de cobranças neste aparelho.</p>
+      <p class="lock-sub" id="lockSubtitle">Entre com seu e-mail e senha.</p>
       <form id="lockForm">
-        <input type="password" id="lockPassword" class="input" placeholder="Senha" autocomplete="current-password" required>
+        <input type="email" id="lockEmail" class="input" placeholder="E-mail" autocomplete="email" required>
+        <input type="password" id="lockPassword" class="input" placeholder="Senha (mínimo 6 caracteres)" autocomplete="current-password" minlength="6" required>
         <input type="password" id="lockPasswordConfirm" class="input hidden" placeholder="Confirme a senha" autocomplete="new-password">
-        <button type="submit" class="btn btn-primary btn-block" id="lockSubmit">Criar senha e entrar</button>
+        <button type="submit" class="btn btn-primary btn-block" id="lockSubmit">Entrar</button>
       </form>
-      <p class="lock-note">Isso é só uma trava simples pra quem pegar o aparelho não abrir de cara. Os dados ficam salvos no navegador deste dispositivo — não em nenhum servidor. Não use senha de banco nem nada sensível aqui.</p>
-      <p class="lock-error hidden" id="lockError">Senha incorreta. Tente de novo.</p>
+      <button type="button" class="lock-link" id="lockSwitchMode">Ainda não tenho conta — criar conta</button>
+      <button type="button" class="lock-link" id="lockForgot">Esqueci minha senha</button>
+      <p class="lock-note">Seus dados ficam salvos com segurança na nuvem (Firebase/Google), na sua conta. Você pode entrar com este e-mail e senha em qualquer aparelho.</p>
+      <p class="lock-error hidden" id="lockError"></p>
     </div>
   </div>
 
   <!-- APP -->
   <div id="app" class="app hidden">
     <aside class="sidebar">
-      <div class="brand">
-        <div class="stamp-mark small">CA</div>
-        <div>
-          <div class="brand-name">Caixa Aberto</div>
-          <div class="brand-sub" id="brandEmpresa">seu financeiro</div>
+      <div class="sidebar-top">
+        <div class="brand">
+          <div class="stamp-mark small">CA</div>
+          <div>
+            <div class="brand-name">Caixa Aberto</div>
+            <div class="brand-sub" id="brandEmpresa">seu financeiro</div>
+          </div>
         </div>
+        <button class="nav-toggle" id="navToggle" aria-label="Abrir menu">
+          <span class="nav-toggle-icon"></span>
+        </button>
       </div>
-      <nav class="nav">
-        <button class="nav-btn active" data-view="dashboard">Painel</button>
-        <button class="nav-btn" data-view="clientes">Clientes</button>
-        <button class="nav-btn" data-view="cobrancas">Cobranças</button>
-        <button class="nav-btn" data-view="agenda">Agenda</button>
-        <button class="nav-btn" data-view="config">Configurações</button>
-      </nav>
-      <button class="btn-logout" id="btnLogout">Trancar</button>
+      <div class="sidebar-menu" id="sidebarMenu">
+        <nav class="nav">
+          <button class="nav-btn active" data-view="dashboard">Painel</button>
+          <button class="nav-btn" data-view="clientes">Clientes</button>
+          <button class="nav-btn" data-view="cobrancas">Cobranças</button>
+          <button class="nav-btn" data-view="agenda">Agenda</button>
+          <button class="nav-btn" data-view="config">Configurações</button>
+        </nav>
+        <button class="btn-logout" id="btnLogout">Sair</button>
+      </div>
     </aside>
     <main id="main" class="main"></main>
   </div>
 
   <div id="modalRoot"></div>
 
+  <!-- Firebase (compat SDK — mais simples de usar sem processo de build) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+  <script src="firebase-config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

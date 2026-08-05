@@ -1,15 +1,11 @@
 /* =======================================================
    CAIXA ABERTO — controle financeiro de clientes
-   Tudo roda no navegador. Dados ficam em localStorage.
+   Interface e regras de negócio aqui. Login e dados ficam
+   no Firebase (Auth + Firestore) — veja firebase-config.js.
    ======================================================= */
 
-const DB_KEYS = {
-  clients: 'ca_clients',
-  charges: 'ca_charges',
-  meetings: 'ca_meetings',
-  settings: 'ca_settings',
-  auth: 'ca_auth'
-};
+/* Os dados agora vivem no Firebase (Firestore), não mais no localStorage.
+   Veja a seção "cache local + sincronização" logo abaixo. */
 
 // ---------- helpers gerais ----------
 const qs = (sel, el = document) => el.querySelector(sel);
@@ -45,17 +41,27 @@ function onlyDigits(str) {
   return String(str || '').replace(/\D/g, '');
 }
 
-// ---------- storage ----------
-function getClients() { return JSON.parse(localStorage.getItem(DB_KEYS.clients) || '[]'); }
-function saveClients(list) { localStorage.setItem(DB_KEYS.clients, JSON.stringify(list)); }
-function getCharges() { return JSON.parse(localStorage.getItem(DB_KEYS.charges) || '[]'); }
-function saveCharges(list) { localStorage.setItem(DB_KEYS.charges, JSON.stringify(list)); }
-function getSettings() {
-  return JSON.parse(localStorage.getItem(DB_KEYS.settings) || '{}');
-}
-function saveSettings(s) { localStorage.setItem(DB_KEYS.settings, JSON.stringify(s)); }
-function getMeetings() { return JSON.parse(localStorage.getItem(DB_KEYS.meetings) || '[]'); }
-function saveMeetings(list) { localStorage.setItem(DB_KEYS.meetings, JSON.stringify(list)); }
+// ---------- CACHE LOCAL + SINCRONIZAÇÃO COM O FIRESTORE ----------
+// Ideia: o resto do app continua chamando getClients()/saveClients() etc.
+// exatamente como antes (por isso quase nada mudou nas telas). A diferença
+// é que agora esses dados vêm de/vão para o Firestore, na nuvem.
+let _clients = [];
+let _charges = [];
+let _meetings = [];
+let _settings = {};
+let _docRef = null;
+let _unsubscribeSnapshot = null;
+let _saveTimer = null;
+
+function getClients() { return _clients; }
+function getCharges() { return _charges; }
+function getMeetings() { return _meetings; }
+function getSettings() { return _settings; }
+
+function saveClients(list) { _clients = list; queuePersist(); }
+function saveCharges(list) { _charges = list; queuePersist(); }
+function saveMeetings(list) { _meetings = list; queuePersist(); }
+function saveSettings(s) { _settings = s; queuePersist(); }
 
 function clientById(id) { return getClients().find(c => c.id === id); }
 
@@ -66,77 +72,167 @@ function chargeStatus(charge) {
   return 'pendente';
 }
 
-// ---------- AUTENTICAÇÃO (trava simples local, não é segurança real) ----------
-async function sha256(text) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+// agrupa várias mudanças rápidas seguidas numa única escrita no Firestore
+function queuePersist() {
+  if (!_docRef) return;
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    _docRef.set({
+      clients: _clients,
+      charges: _charges,
+      meetings: _meetings,
+      settings: _settings,
+      updatedAt: new Date().toISOString()
+    }, { merge: true }).catch(err => {
+      console.error('Erro ao salvar no Firebase:', err);
+      showSyncError();
+    });
+  }, 300);
 }
 
-function getAuth() { return JSON.parse(localStorage.getItem(DB_KEYS.auth) || 'null'); }
-function saveAuth(hash) { localStorage.setItem(DB_KEYS.auth, JSON.stringify({ hash })); }
+function showSyncError() {
+  let el = qs('#syncError');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'syncError';
+    el.className = 'sync-banner';
+    document.body.appendChild(el);
+  }
+  el.textContent = 'Não consegui salvar na nuvem agora. Confira sua internet — a última alteração pode não ter sido salva.';
+  el.classList.add('show');
+  clearTimeout(el._hideTimer);
+  el._hideTimer = setTimeout(() => el.classList.remove('show'), 6000);
+}
+
+// mantém a página onde o usuário estava, mesmo quando os dados
+// chegam de novo pelo Firestore (própria escrita ou outro aparelho)
+let currentDetailClientId = null;
+
+function startFirestoreSync(uid) {
+  _docRef = db.collection('users').doc(uid).collection('app').doc('data');
+  _unsubscribeSnapshot = _docRef.onSnapshot(snap => {
+    const data = snap.data() || {};
+    _clients = data.clients || [];
+    _charges = data.charges || [];
+    _meetings = data.meetings || [];
+    _settings = data.settings || {};
+    refreshBrandBar();
+    if (currentDetailClientId && clientById(currentDetailClientId)) {
+      renderClienteDetalhe(currentDetailClientId);
+    } else {
+      navigate(currentView);
+    }
+  }, err => {
+    console.error('Erro ao sincronizar com o Firebase:', err);
+    showSyncError();
+  });
+}
+
+function stopFirestoreSync() {
+  if (_unsubscribeSnapshot) _unsubscribeSnapshot();
+  _unsubscribeSnapshot = null;
+  _docRef = null;
+  _clients = []; _charges = []; _meetings = []; _settings = {};
+}
+
+// ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
+let authMode = 'login'; // 'login' ou 'signup'
 
 function initLockScreen() {
-  const auth = getAuth();
-  const isSetup = !auth;
   const subtitle = qs('#lockSubtitle');
   const confirmInput = qs('#lockPasswordConfirm');
   const submitBtn = qs('#lockSubmit');
+  const switchBtn = qs('#lockSwitchMode');
+  const forgotBtn = qs('#lockForgot');
   const errorMsg = qs('#lockError');
 
-  if (isSetup) {
-    subtitle.textContent = 'Crie uma senha para abrir seu livro de cobranças neste aparelho.';
-    confirmInput.classList.remove('hidden');
-    confirmInput.required = true;
-    submitBtn.textContent = 'Criar senha e entrar';
-  } else {
-    subtitle.textContent = 'Digite sua senha para abrir.';
-    confirmInput.classList.add('hidden');
-    confirmInput.required = false;
-    submitBtn.textContent = 'Entrar';
+  function paintMode() {
+    if (authMode === 'signup') {
+      subtitle.textContent = 'Crie sua conta pra começar a usar o Caixa Aberto.';
+      confirmInput.classList.remove('hidden');
+      confirmInput.required = true;
+      submitBtn.textContent = 'Criar conta';
+      switchBtn.textContent = 'Já tenho conta — entrar';
+    } else {
+      subtitle.textContent = 'Entre com seu e-mail e senha.';
+      confirmInput.classList.add('hidden');
+      confirmInput.required = false;
+      submitBtn.textContent = 'Entrar';
+      switchBtn.textContent = 'Ainda não tenho conta — criar conta';
+    }
+    errorMsg.classList.add('hidden');
   }
+  paintMode();
+
+  switchBtn.onclick = () => { authMode = authMode === 'login' ? 'signup' : 'login'; paintMode(); };
+
+  forgotBtn.onclick = async () => {
+    const email = qs('#lockEmail').value.trim();
+    if (!email) {
+      errorMsg.textContent = 'Digite seu e-mail no campo acima primeiro.';
+      errorMsg.classList.remove('hidden');
+      return;
+    }
+    try {
+      await auth.sendPasswordResetEmail(email);
+      errorMsg.style.color = 'var(--emerald)';
+      errorMsg.textContent = 'Te mandamos um e-mail com o link pra trocar a senha.';
+      errorMsg.classList.remove('hidden');
+    } catch (err) {
+      errorMsg.style.color = '';
+      errorMsg.textContent = traduzErroFirebase(err);
+      errorMsg.classList.remove('hidden');
+    }
+  };
 
   qs('#lockForm').onsubmit = async (e) => {
     e.preventDefault();
+    errorMsg.style.color = '';
     errorMsg.classList.add('hidden');
+    const email = qs('#lockEmail').value.trim();
     const pass = qs('#lockPassword').value;
-
-    if (isSetup) {
-      const confirm = confirmInput.value;
-      if (pass.length < 4) {
-        errorMsg.textContent = 'Use pelo menos 4 caracteres.';
-        errorMsg.classList.remove('hidden');
-        return;
-      }
-      if (pass !== confirm) {
-        errorMsg.textContent = 'As senhas não coincidem.';
-        errorMsg.classList.remove('hidden');
-        return;
-      }
-      const hash = await sha256(pass);
-      saveAuth(hash);
-      enterApp();
-    } else {
-      const hash = await sha256(pass);
-      if (hash === auth.hash) {
-        enterApp();
+    submitBtn.disabled = true;
+    try {
+      if (authMode === 'signup') {
+        if (pass !== confirmInput.value) throw { code: '', message: 'As senhas não coincidem.' };
+        await auth.createUserWithEmailAndPassword(email, pass);
       } else {
-        errorMsg.textContent = 'Senha incorreta. Tente de novo.';
-        errorMsg.classList.remove('hidden');
-        qs('#lockPassword').value = '';
+        await auth.signInWithEmailAndPassword(email, pass);
       }
+      // o resto (mostrar o app, carregar os dados) acontece no onAuthStateChanged
+    } catch (err) {
+      errorMsg.textContent = traduzErroFirebase(err);
+      errorMsg.classList.remove('hidden');
+    } finally {
+      submitBtn.disabled = false;
     }
   };
+}
+
+function traduzErroFirebase(err) {
+  const map = {
+    'auth/email-already-in-use': 'Esse e-mail já tem uma conta. Tenta entrar em vez de criar.',
+    'auth/invalid-email': 'E-mail inválido.',
+    'auth/weak-password': 'Senha muito fraca — use pelo menos 6 caracteres.',
+    'auth/user-not-found': 'Não achei uma conta com esse e-mail.',
+    'auth/wrong-password': 'Senha incorreta.',
+    'auth/invalid-credential': 'E-mail ou senha incorretos.',
+    'auth/too-many-requests': 'Muitas tentativas seguidas. Espera um pouco e tenta de novo.',
+    'auth/network-request-failed': 'Sem conexão com a internet.'
+  };
+  return (err && map[err.code]) || (err && err.message) || 'Algo deu errado. Tenta de novo.';
 }
 
 function enterApp() {
   qs('#lockScreen').classList.add('hidden');
   qs('#app').classList.remove('hidden');
   qs('#lockForm').reset();
+  currentDetailClientId = null;
   navigate('dashboard');
   refreshBrandBar();
 }
 
-function lockApp() {
+function showLockScreen() {
   qs('#app').classList.add('hidden');
   qs('#lockScreen').classList.remove('hidden');
   initLockScreen();
@@ -156,6 +252,7 @@ function closeModal() { qs('#modalRoot').innerHTML = ''; }
 let currentView = 'dashboard';
 
 function navigate(view) {
+  currentDetailClientId = null;
   currentView = view;
   qsa('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   const renderers = {
@@ -285,7 +382,7 @@ function renderClientes() {
           <div class="ledger-row">
             <div class="ledger-main">
               <div class="ledger-title">${escapeHtml(c.nome)}</div>
-              <div class="ledger-sub">${escapeHtml(c.telefone || 'sem telefone')} ${c.email ? '· ' + escapeHtml(c.email) : ''}</div>
+              <div class="ledger-sub">${escapeHtml(c.telefone || 'sem telefone')} ${c.email ? '· ' + escapeHtml(c.email) : ''} ${c.cidade ? '· ' + escapeHtml(c.cidade) : ''}</div>
             </div>
             <div class="ledger-value ${totalAberto > 0 ? 'brick' : ''}">${totalAberto > 0 ? formatCurrency(totalAberto) + ' em aberto' : 'em dia'}</div>
             <div class="ledger-actions">
@@ -333,6 +430,33 @@ function openClientModal(id, onSaved) {
         <label class="field-label">E-mail (opcional)</label>
         <input class="input" type="email" id="cEmail" value="${editing ? escapeHtml(editing.email || '') : ''}">
       </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Tipo</label>
+          <select class="input" id="cTipo">
+            <option value="pf" ${editing && editing.tipo === 'pf' ? 'selected' : ''}>Pessoa física</option>
+            <option value="pj" ${editing && editing.tipo === 'pj' ? 'selected' : ''}>Pessoa jurídica</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label">CPF / CNPJ (opcional)</label>
+          <input class="input" id="cDocumento" value="${editing ? escapeHtml(editing.documento || '') : ''}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Cidade / UF (opcional)</label>
+          <input class="input" id="cCidade" placeholder="Ex: Salto do Lontra/PR" value="${editing ? escapeHtml(editing.cidade || '') : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">Cliente desde</label>
+          <input class="input" type="date" id="cDesde" value="${editing ? (editing.clienteDesde || '') : todayISO()}">
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Endereço (opcional)</label>
+        <input class="input" id="cEndereco" placeholder="Rua, número, bairro" value="${editing ? escapeHtml(editing.endereco || '') : ''}">
+      </div>
       <div class="field">
         <label class="field-label">Observações (opcional)</label>
         <textarea class="input" id="cObs" style="min-height:60px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.obs || '') : ''}</textarea>
@@ -353,11 +477,18 @@ function openClientModal(id, onSaved) {
       return;
     }
     const clients = getClients();
+    const extra = {
+      tipo: qs('#cTipo').value,
+      documento: qs('#cDocumento').value.trim(),
+      cidade: qs('#cCidade').value.trim(),
+      endereco: qs('#cEndereco').value.trim(),
+      clienteDesde: qs('#cDesde').value || null
+    };
     if (editing) {
       const idx = clients.findIndex(c => c.id === editing.id);
-      clients[idx] = { ...editing, nome, telefone: telefoneDigits, email: qs('#cEmail').value.trim(), obs: qs('#cObs').value.trim() };
+      clients[idx] = { ...editing, nome, telefone: telefoneDigits, email: qs('#cEmail').value.trim(), obs: qs('#cObs').value.trim(), ...extra };
     } else {
-      clients.push({ id: uid(), nome, telefone: telefoneDigits, email: qs('#cEmail').value.trim(), obs: qs('#cObs').value.trim() });
+      clients.push({ id: uid(), nome, telefone: telefoneDigits, email: qs('#cEmail').value.trim(), obs: qs('#cObs').value.trim(), projetos: [], ...extra });
     }
     saveClients(clients);
     closeModal();
@@ -369,6 +500,7 @@ function openClientModal(id, onSaved) {
 function renderClienteDetalhe(clientId) {
   const client = clientById(clientId);
   if (!client) { navigate('clientes'); return; }
+  currentDetailClientId = clientId;
   if (!client.projetos) client.projetos = [];
 
   const charges = getCharges().filter(c => c.clientId === clientId).sort((a, b) => b.vencimento.localeCompare(a.vencimento));
@@ -383,7 +515,15 @@ function renderClienteDetalhe(clientId) {
     <div class="view-header">
       <div>
         <div class="view-title">${escapeHtml(client.nome)}</div>
-        <div class="view-desc">${escapeHtml(client.telefone)} ${client.email ? '· ' + escapeHtml(client.email) : ''}</div>
+        <div class="view-desc">
+          ${escapeHtml(client.telefone)} ${client.email ? '· ' + escapeHtml(client.email) : ''}
+          ${client.tipo ? '· ' + (client.tipo === 'pj' ? 'Pessoa jurídica' : 'Pessoa física') : ''}
+          ${client.documento ? '· ' + escapeHtml(client.documento) : ''}
+        </div>
+        <div class="view-desc">
+          ${client.cidade ? escapeHtml(client.cidade) : ''}${client.endereco ? (client.cidade ? ' · ' : '') + escapeHtml(client.endereco) : ''}
+          ${client.clienteDesde ? (client.cidade || client.endereco ? ' · ' : '') + 'Cliente desde ' + formatDateBR(client.clienteDesde) : ''}
+        </div>
       </div>
       <div style="display:flex; gap:8px;">
         <button class="btn btn-ghost btn-sm" id="btnEditarNoDetalhe">Editar dados</button>
@@ -657,6 +797,7 @@ function renderMeetingRow(m) {
       <div class="ledger-actions">
         ${m.status === 'agendada' ? `
           <button class="btn btn-ghost btn-sm" data-edit-meeting="${m.id}">Editar</button>
+          ${client ? `<button class="btn btn-whatsapp btn-sm" data-remind-meeting="${m.id}">Lembrete</button>` : ''}
           <button class="btn btn-ghost btn-sm" data-done-meeting="${m.id}">Realizada</button>
           <button class="btn btn-ghost btn-sm" data-cancel-meeting="${m.id}">Cancelar</button>
         ` : ''}
@@ -668,6 +809,7 @@ function renderMeetingRow(m) {
 
 function bindMeetingActions(afterChange) {
   qsa('[data-edit-meeting]').forEach(b => b.onclick = () => openMeetingModal(b.dataset.editMeeting, null, afterChange));
+  qsa('[data-remind-meeting]').forEach(b => b.onclick = () => openMeetingWhatsappModal(b.dataset.remindMeeting));
   qsa('[data-done-meeting]').forEach(b => b.onclick = () => {
     const meetings = getMeetings();
     const idx = meetings.findIndex(m => m.id === b.dataset.doneMeeting);
@@ -776,11 +918,29 @@ function openWhatsappModal(chargeId) {
   const charge = getCharges().find(c => c.id === chargeId);
   const client = clientById(charge.clientId);
   if (!client) { alert('Cliente não encontrado.'); return; }
+  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client));
+}
 
-  const defaultMsg = buildMessage(charge, client);
+function buildMeetingMessage(meeting, client) {
+  const settings = getSettings();
+  const empresa = settings.empresaNome ? settings.empresaNome : '';
+  return `Olá, ${client.nome}! ${empresa ? 'Aqui é da ' + empresa + '.' : ''}` +
+    `\nPassando pra lembrar da nossa reunião: ${meeting.titulo}` +
+    `\nData: ${formatDateBR(meeting.data)}${meeting.hora ? ' às ' + meeting.hora : ''}` +
+    `${meeting.local ? '\nLocal/link: ' + meeting.local : ''}` +
+    `\n\nQualquer imprevisto, me avisa por aqui. Até lá!`;
+}
 
+function openMeetingWhatsappModal(meetingId) {
+  const meeting = getMeetings().find(m => m.id === meetingId);
+  const client = meeting.clientId ? clientById(meeting.clientId) : null;
+  if (!client) { alert('Essa reunião não tem cliente vinculado.'); return; }
+  openSendWhatsappModal(`Enviar lembrete — ${client.nome}`, client, buildMeetingMessage(meeting, client));
+}
+
+function openSendWhatsappModal(title, client, defaultMsg) {
   openModal(`
-    <div class="modal-title">Enviar cobrança — ${escapeHtml(client.nome)}</div>
+    <div class="modal-title">${escapeHtml(title)}</div>
     <div class="field">
       <label class="field-label">Mensagem (pode editar antes de enviar)</label>
       <textarea class="input" id="waMsg" style="min-height:170px;">${escapeHtml(defaultMsg)}</textarea>
@@ -818,6 +978,12 @@ function renderConfig() {
       </div>
     </div>
 
+    <div class="section-title">Sua conta</div>
+    <p class="view-desc" style="margin-bottom:24px;">
+      Logado como <strong>${escapeHtml(auth.currentUser ? auth.currentUser.email : '')}</strong>.
+      Use este e-mail e senha pra entrar em outros aparelhos.
+    </p>
+
     <div class="section-title">Seus dados</div>
     <form id="settingsForm" style="max-width:420px; margin-bottom:32px;">
       <div class="field">
@@ -837,8 +1003,9 @@ function renderConfig() {
 
     <div class="section-title">Backup dos dados</div>
     <p class="view-desc" style="margin-bottom:14px; max-width:520px;">
-      Tudo é salvo só neste navegador. Se trocar de aparelho, limpar o cache ou reinstalar o navegador, os dados somem —
-      então exporte um backup de vez em quando e guarde o arquivo em algum lugar seguro.
+      Seus dados já ficam salvos na nuvem (Firebase), então não somem se você trocar
+      de aparelho. Ainda assim, é uma boa prática exportar um backup de vez em
+      quando — serve como cópia extra de segurança.
     </p>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:32px;">
       <button class="btn btn-ghost" id="btnExport">Exportar backup (.json)</button>
@@ -849,7 +1016,7 @@ function renderConfig() {
     </div>
 
     <div class="section-title">Zona de risco</div>
-    <p class="view-desc" style="margin-bottom:14px;">Isso apaga tudo (${clients.length} clientes, ${charges.length} cobranças, ${getMeetings().length} reuniões) permanentemente deste navegador.</p>
+    <p class="view-desc" style="margin-bottom:14px;">Isso apaga tudo (${clients.length} clientes, ${charges.length} cobranças, ${getMeetings().length} reuniões) permanentemente da sua conta.</p>
     <button class="btn btn-danger" id="btnWipe">Apagar todos os dados</button>
   `;
 
@@ -896,10 +1063,10 @@ function renderConfig() {
   qs('#btnWipe').onclick = () => {
     if (confirm('Tem certeza? Essa ação não pode ser desfeita.')) {
       if (confirm('Confirma de novo: apagar TUDO?')) {
-        localStorage.removeItem(DB_KEYS.clients);
-        localStorage.removeItem(DB_KEYS.charges);
-        localStorage.removeItem(DB_KEYS.meetings);
-        localStorage.removeItem(DB_KEYS.settings);
+        saveClients([]);
+        saveCharges([]);
+        saveMeetings([]);
+        saveSettings({});
         navigate('dashboard');
       }
     }
@@ -919,8 +1086,33 @@ function emptyState(title, sub) {
 
 // ---------- BOOT ----------
 document.addEventListener('DOMContentLoaded', () => {
-  initLockScreen();
+  const sidebarMenu = qs('#sidebarMenu');
+  const navToggle = qs('#navToggle');
 
-  qsa('.nav-btn').forEach(btn => btn.addEventListener('click', () => navigate(btn.dataset.view)));
-  qs('#btnLogout').addEventListener('click', lockApp);
+  navToggle.addEventListener('click', () => {
+    sidebarMenu.classList.toggle('open');
+    navToggle.classList.toggle('open');
+  });
+
+  qsa('.nav-btn').forEach(btn => btn.addEventListener('click', () => {
+    navigate(btn.dataset.view);
+    sidebarMenu.classList.remove('open');
+    navToggle.classList.remove('open');
+  }));
+
+  qs('#btnLogout').addEventListener('click', () => {
+    sidebarMenu.classList.remove('open');
+    navToggle.classList.remove('open');
+    auth.signOut();
+  });
+
+  auth.onAuthStateChanged(user => {
+    if (user) {
+      startFirestoreSync(user.uid);
+      enterApp();
+    } else {
+      stopFirestoreSync();
+      showLockScreen();
+    }
+  });
 });
