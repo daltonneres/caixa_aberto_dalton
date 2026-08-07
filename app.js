@@ -32,6 +32,18 @@ function getGreeting() {
   if (h >= 12 && h < 18) return 'Boa tarde';
   return 'Boa noite';
 }
+function daysUntil(dateISO) {
+  const hoje = new Date(todayISO() + 'T00:00:00');
+  const alvo = new Date(dateISO + 'T00:00:00');
+  return Math.round((alvo - hoje) / 86400000);
+}
+function meetingCountdownLabel(dateISO) {
+  const d = daysUntil(dateISO);
+  if (d < 0) return null;
+  if (d === 0) return 'Hoje';
+  if (d === 1) return 'Amanhã';
+  return `Em ${d} dias`;
+}
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -39,6 +51,21 @@ function escapeHtml(str) {
 }
 function onlyDigits(str) {
   return String(str || '').replace(/\D/g, '');
+}
+
+// ---------- PLANOS FIXOS (Suporte e Evolução) ----------
+const PLANOS = [
+  { id: 'base', nome: 'Plano Base', valor: 89.90 },
+  { id: 'dominio', nome: 'Plano Domínio', valor: 109.90 },
+  { id: 'firebase', nome: 'Plano Firebase', valor: 119.90 },
+  { id: 'completo', nome: 'Plano Completo', valor: 139.90 }
+];
+function planoById(id) { return PLANOS.find(p => p.id === id); }
+function formatDocumento(digits) {
+  if (!digits) return '';
+  if (digits.length === 11) return digits.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+  if (digits.length === 14) return digits.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5');
+  return digits;
 }
 
 // ---------- CACHE LOCAL + SINCRONIZAÇÃO COM O FIRESTORE ----------
@@ -296,6 +323,7 @@ function renderDashboard() {
     .slice(0, 5);
 
   const nomeUsuario = settings.seuNome ? `, ${escapeHtml(settings.seuNome)}` : '';
+  const proximaReuniao = proximasReunioes[0] || null;
 
   qs('#main').innerHTML = `
     <div class="view-header">
@@ -313,7 +341,15 @@ function renderDashboard() {
           return `<span class="today-item">${m.hora ? m.hora + ' — ' : ''}${escapeHtml(m.titulo)}${cli ? ' (' + escapeHtml(cli.nome) + ')' : ''}</span>`;
         }).join('')}
       </div>
-    ` : ''}
+    ` : (proximaReuniao ? `
+      <div class="countdown-banner">
+        <div class="countdown-number">${daysUntil(proximaReuniao.data)}</div>
+        <div class="countdown-text">
+          <strong>${meetingCountdownLabel(proximaReuniao.data)}</strong> para sua próxima reunião
+          <div class="countdown-sub">${escapeHtml(proximaReuniao.titulo)}${proximaReuniao.clientId && clientById(proximaReuniao.clientId) ? ' · ' + escapeHtml(clientById(proximaReuniao.clientId).nome) : ''} — ${formatDateBR(proximaReuniao.data)}${proximaReuniao.hora ? ' às ' + proximaReuniao.hora : ''}</div>
+        </div>
+      </div>
+    ` : '')}
 
     <div class="cards-grid">
       <div class="stat-card">
@@ -351,6 +387,7 @@ function renderDashboard() {
                   <div class="ledger-title">${escapeHtml(m.titulo)}</div>
                   <div class="ledger-sub">${formatDateBR(m.data)}${m.hora ? ' às ' + m.hora : ''}${cli ? ' · ' + escapeHtml(cli.nome) : ''}</div>
                 </div>
+                <span class="stamp-badge stamp-pendente">${meetingCountdownLabel(m.data)}</span>
               </div>`;
             }).join('')}
           </div>
@@ -384,6 +421,7 @@ function renderClientes() {
               <div class="ledger-title">${escapeHtml(c.nome)}</div>
               <div class="ledger-sub">${escapeHtml(c.telefone || 'sem telefone')} ${c.email ? '· ' + escapeHtml(c.email) : ''} ${c.cidade ? '· ' + escapeHtml(c.cidade) : ''}</div>
             </div>
+            ${c.plano ? `<span class="stamp-badge stamp-pausado">${escapeHtml(c.plano)}</span>` : ''}
             <div class="ledger-value ${totalAberto > 0 ? 'brick' : ''}">${totalAberto > 0 ? formatCurrency(totalAberto) + ' em aberto' : 'em dia'}</div>
             <div class="ledger-actions">
               <button class="btn btn-primary btn-sm" data-view-client="${c.id}">Ver</button>
@@ -415,6 +453,8 @@ function renderClientes() {
 
 function openClientModal(id, onSaved) {
   const editing = id ? clientById(id) : null;
+  const outrosClientes = getClients().filter(c => !editing || c.id !== editing.id);
+
   openModal(`
     <div class="modal-title">${editing ? 'Editar cliente' : 'Novo cliente'}</div>
     <form id="clientForm">
@@ -440,7 +480,7 @@ function openClientModal(id, onSaved) {
         </div>
         <div class="field">
           <label class="field-label">CPF / CNPJ (opcional)</label>
-          <input class="input" id="cDocumento" value="${editing ? escapeHtml(editing.documento || '') : ''}">
+          <input class="input" id="cDocumento" placeholder="Só números" value="${editing ? escapeHtml(formatDocumento(editing.documento || '')) : ''}">
         </div>
       </div>
       <div class="field-row">
@@ -458,6 +498,44 @@ function openClientModal(id, onSaved) {
         <input class="input" id="cEndereco" placeholder="Rua, número, bairro" value="${editing ? escapeHtml(editing.endereco || '') : ''}">
       </div>
       <div class="field">
+        <label class="field-label">Pasta de documentos (link, opcional)</label>
+        <input class="input" type="url" id="cPasta" placeholder="Ex: link do Google Drive, Dropbox..." value="${editing ? escapeHtml(editing.pastaDocumentos || '') : ''}">
+      </div>
+
+      <div class="field">
+        <label class="field-label">Plano contratado</label>
+        <select class="input" id="cPlanoId">
+          <option value="">— nenhum —</option>
+          ${PLANOS.map(p => `<option value="${p.id}" ${editing && editing.planoId === p.id ? 'selected' : ''}>${p.nome} — ${formatCurrency(p.valor)}/mês</option>`).join('')}
+          <option value="personalizado" ${editing && editing.planoId === 'personalizado' ? 'selected' : ''}>Personalizado</option>
+        </select>
+      </div>
+      <div class="field-row" id="cPlanoPersonalizadoRow" style="${editing && editing.planoId === 'personalizado' ? '' : 'display:none;'}">
+        <div class="field">
+          <label class="field-label">Nome do plano personalizado</label>
+          <input class="input" id="cPlanoPersonalizado" value="${editing && editing.planoId === 'personalizado' ? escapeHtml(editing.plano || '') : ''}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Valor do plano (R$/mês)</label>
+          <input class="input" type="number" min="0" step="0.01" id="cValorPlano" value="${editing && editing.valorPlano != null ? editing.valorPlano : ''}">
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field-label">Indicado por (opcional)</label>
+        <select class="input" id="cIndicadoPor">
+          <option value="">— ninguém / indicação externa —</option>
+          ${outrosClientes.map(c => `<option value="${c.id}" ${editing && editing.indicadoPor === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label">Ou nome de quem indicou (se não for um cliente cadastrado)</label>
+        <input class="input" id="cIndicadoPorTexto" placeholder="Ex: indicação de um amigo" value="${editing ? escapeHtml(editing.indicadoPorTexto || '') : ''}">
+      </div>
+
+      <div class="field">
         <label class="field-label">Observações (opcional)</label>
         <textarea class="input" id="cObs" style="min-height:60px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.obs || '') : ''}</textarea>
       </div>
@@ -468,27 +546,88 @@ function openClientModal(id, onSaved) {
     </form>
   `);
   qs('#btnCancelClient').onclick = closeModal;
+
+  qs('#cPlanoId').onchange = () => {
+    const id = qs('#cPlanoId').value;
+    qs('#cPlanoPersonalizadoRow').style.display = id === 'personalizado' ? '' : 'none';
+    const plano = planoById(id);
+    if (plano) qs('#cValorPlano').value = plano.valor;
+  };
   qs('#clientForm').onsubmit = (e) => {
     e.preventDefault();
+
     const nome = qs('#cNome').value.trim();
-    const telefoneDigits = onlyDigits(qs('#cTelefone').value);
-    if (!nome || telefoneDigits.length < 10) {
-      alert('Confira o nome e o telefone (precisa ter DDD + número).');
+    if (nome.length < 2) {
+      alert('Digite o nome completo do cliente.');
       return;
     }
+
+    const telefoneDigits = onlyDigits(qs('#cTelefone').value);
+    if (telefoneDigits.length < 10 || telefoneDigits.length > 13) {
+      alert('Confira o telefone: precisa ter código do país + DDD + número (ex: 5545999998888).');
+      return;
+    }
+
+    const emailVal = qs('#cEmail').value.trim();
+    if (emailVal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailVal)) {
+      alert('Esse e-mail não parece válido. Confira ou deixe em branco.');
+      return;
+    }
+
+    const documentoDigits = onlyDigits(qs('#cDocumento').value);
+    if (documentoDigits && documentoDigits.length !== 11 && documentoDigits.length !== 14) {
+      alert('CPF precisa ter 11 números ou CNPJ 14 números. Confira ou deixe em branco.');
+      return;
+    }
+
+    let pastaDocumentos = qs('#cPasta').value.trim();
+    if (pastaDocumentos && !/^https?:\/\//i.test(pastaDocumentos)) {
+      pastaDocumentos = 'https://' + pastaDocumentos;
+    }
+
+    const planoId = qs('#cPlanoId').value;
+    let planoNome = '';
+    if (planoId === 'personalizado') {
+      planoNome = qs('#cPlanoPersonalizado').value.trim();
+      if (!planoNome) {
+        alert('Digite o nome do plano personalizado.');
+        return;
+      }
+    } else if (planoId) {
+      planoNome = planoById(planoId).nome;
+    }
+
+    const valorPlanoRaw = qs('#cValorPlano').value;
+    if (valorPlanoRaw !== '' && Number(valorPlanoRaw) < 0) {
+      alert('O valor do plano não pode ser negativo.');
+      return;
+    }
+
+    const indicadoPor = qs('#cIndicadoPor').value;
+    if (editing && indicadoPor === editing.id) {
+      alert('Um cliente não pode ser indicado por ele mesmo.');
+      return;
+    }
+
     const clients = getClients();
     const extra = {
       tipo: qs('#cTipo').value,
-      documento: qs('#cDocumento').value.trim(),
+      documento: documentoDigits,
       cidade: qs('#cCidade').value.trim(),
       endereco: qs('#cEndereco').value.trim(),
-      clienteDesde: qs('#cDesde').value || null
+      pastaDocumentos,
+      clienteDesde: qs('#cDesde').value || null,
+      planoId: planoId || null,
+      plano: planoNome,
+      valorPlano: valorPlanoRaw === '' ? null : Number(valorPlanoRaw),
+      indicadoPor: indicadoPor || null,
+      indicadoPorTexto: qs('#cIndicadoPorTexto').value.trim()
     };
     if (editing) {
       const idx = clients.findIndex(c => c.id === editing.id);
-      clients[idx] = { ...editing, nome, telefone: telefoneDigits, email: qs('#cEmail').value.trim(), obs: qs('#cObs').value.trim(), ...extra };
+      clients[idx] = { ...editing, nome, telefone: telefoneDigits, email: emailVal, obs: qs('#cObs').value.trim(), ...extra };
     } else {
-      clients.push({ id: uid(), nome, telefone: telefoneDigits, email: qs('#cEmail').value.trim(), obs: qs('#cObs').value.trim(), projetos: [], ...extra });
+      clients.push({ id: uid(), nome, telefone: telefoneDigits, email: emailVal, obs: qs('#cObs').value.trim(), projetos: [], ...extra });
     }
     saveClients(clients);
     closeModal();
@@ -509,6 +648,14 @@ function renderClienteDetalhe(clientId) {
   const statusLabel = { andamento: 'Em andamento', concluido: 'Concluído', pausado: 'Pausado' };
   const statusClass = { andamento: 'stamp-pendente', concluido: 'stamp-pago', pausado: 'stamp-pausado' };
 
+  const settings = getSettings();
+  const indicadorNome = client.indicadoPor
+    ? (clientById(client.indicadoPor) ? clientById(client.indicadoPor).nome : 'Cliente removido')
+    : (client.indicadoPorTexto || '—');
+  const indicados = getClients().filter(c => c.indicadoPor === client.id);
+  const descontoPorIndicacao = Number(settings.valorDescontoIndicacao) || 0;
+  const descontoTotal = indicados.length * descontoPorIndicacao;
+
   qs('#main').innerHTML = `
     <button class="btn btn-ghost btn-sm" id="btnVoltarClientes" style="margin-bottom:18px;">← Voltar para clientes</button>
 
@@ -518,20 +665,52 @@ function renderClienteDetalhe(clientId) {
         <div class="view-desc">
           ${escapeHtml(client.telefone)} ${client.email ? '· ' + escapeHtml(client.email) : ''}
           ${client.tipo ? '· ' + (client.tipo === 'pj' ? 'Pessoa jurídica' : 'Pessoa física') : ''}
-          ${client.documento ? '· ' + escapeHtml(client.documento) : ''}
+          ${client.documento ? '· ' + escapeHtml(formatDocumento(client.documento)) : ''}
         </div>
         <div class="view-desc">
           ${client.cidade ? escapeHtml(client.cidade) : ''}${client.endereco ? (client.cidade ? ' · ' : '') + escapeHtml(client.endereco) : ''}
           ${client.clienteDesde ? (client.cidade || client.endereco ? ' · ' : '') + 'Cliente desde ' + formatDateBR(client.clienteDesde) : ''}
         </div>
       </div>
-      <div style="display:flex; gap:8px;">
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        ${client.pastaDocumentos ? `<a class="btn btn-ghost btn-sm" href="${escapeHtml(client.pastaDocumentos)}" target="_blank" rel="noopener">📁 Pasta de documentos</a>` : ''}
         <button class="btn btn-ghost btn-sm" id="btnEditarNoDetalhe">Editar dados</button>
         <button class="btn btn-primary btn-sm" id="btnNovaReuniaoDetalhe">+ Reunião</button>
       </div>
     </div>
 
     ${client.obs ? `<p class="view-desc" style="margin:-14px 0 22px;">${escapeHtml(client.obs)}</p>` : ''}
+
+    <div class="section-title">Plano e indicações</div>
+    <div class="cards-grid cards-grid-3" style="margin-bottom:16px;">
+      <div class="stat-card">
+        <div class="stat-label">Plano</div>
+        <div class="stat-value" style="font-size:16px;">${client.plano ? escapeHtml(client.plano) : '—'}</div>
+        ${client.valorPlano != null ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(client.valorPlano)}/mês</div>` : ''}
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Indicado por</div>
+        <div class="stat-value" style="font-size:16px;">${escapeHtml(indicadorNome)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Indicações feitas</div>
+        <div class="stat-value emerald" style="font-size:16px;">${indicados.length}</div>
+        ${descontoTotal > 0 ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(descontoTotal)} em desconto acumulado</div>` : ''}
+      </div>
+    </div>
+    ${indicados.length > 0 ? `
+      <div class="ledger" style="margin-bottom:30px;">
+        ${indicados.map(c => `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(c.nome)}</div>
+              <div class="ledger-sub">indicado(a) por ${escapeHtml(client.nome)}</div>
+            </div>
+            <button class="btn btn-ghost btn-sm" data-view-client="${c.id}">Ver</button>
+          </div>
+        `).join('')}
+      </div>
+    ` : ''}
 
     <div class="section-title" style="display:flex; align-items:center; justify-content:space-between;">
       <span>O que está sendo desenvolvido</span>
@@ -572,6 +751,7 @@ function renderClienteDetalhe(clientId) {
   qs('#btnEditarNoDetalhe').onclick = () => openClientModal(client.id, () => renderClienteDetalhe(client.id));
   qs('#btnNovoProjeto').onclick = () => openProjectModal(client.id);
   qs('#btnNovaReuniaoDetalhe').onclick = () => openMeetingModal(null, client.id, () => renderClienteDetalhe(client.id));
+  qsa('[data-view-client]').forEach(b => b.onclick = () => renderClienteDetalhe(b.dataset.viewClient));
   qsa('[data-edit-proj]').forEach(b => b.onclick = () => openProjectModal(client.id, b.dataset.editProj));
   qsa('[data-del-proj]').forEach(b => b.onclick = () => {
     if (confirm('Excluir este projeto?')) {
@@ -787,12 +967,14 @@ function renderMeetingRow(m) {
   const client = m.clientId ? clientById(m.clientId) : null;
   const statusClass = { agendada: 'stamp-pendente', realizada: 'stamp-pago', cancelada: 'stamp-pausado' }[m.status] || 'stamp-pendente';
   const statusLabel = { agendada: 'Agendada', realizada: 'Realizada', cancelada: 'Cancelada' }[m.status] || 'Agendada';
+  const contagem = m.status === 'agendada' ? meetingCountdownLabel(m.data) : null;
   return `
     <div class="ledger-row">
       <div class="ledger-main">
         <div class="ledger-title">${escapeHtml(m.titulo)}</div>
         <div class="ledger-sub">${formatDateBR(m.data)}${m.hora ? ' às ' + m.hora : ''}${client ? ' · ' + escapeHtml(client.nome) : ''}${m.local ? ' · ' + escapeHtml(m.local) : ''}</div>
       </div>
+      ${contagem ? `<span class="stamp-badge stamp-pausado">${contagem}</span>` : ''}
       <span class="stamp-badge ${statusClass}">${statusLabel}</span>
       <div class="ledger-actions">
         ${m.status === 'agendada' ? `
@@ -999,6 +1181,10 @@ function renderConfig() {
         <label class="field-label">Chave PIX (opcional, aparece na mensagem)</label>
         <input class="input" id="sPix" value="${escapeHtml(s.pix || '')}">
       </div>
+      <div class="field">
+        <label class="field-label">Desconto por indicação (R$, opcional)</label>
+        <input class="input" type="number" min="0" step="0.01" id="sDescontoIndicacao" value="${s.valorDescontoIndicacao != null ? s.valorDescontoIndicacao : ''}">
+      </div>
       <button type="submit" class="btn btn-primary">Salvar</button>
     </form>
 
@@ -1023,7 +1209,12 @@ function renderConfig() {
 
   qs('#settingsForm').onsubmit = (e) => {
     e.preventDefault();
-    saveSettings({ seuNome: qs('#sSeuNome').value.trim(), empresaNome: qs('#sEmpresa').value.trim(), pix: qs('#sPix').value.trim() });
+    saveSettings({
+      seuNome: qs('#sSeuNome').value.trim(),
+      empresaNome: qs('#sEmpresa').value.trim(),
+      pix: qs('#sPix').value.trim(),
+      valorDescontoIndicacao: qs('#sDescontoIndicacao').value === '' ? null : Number(qs('#sDescontoIndicacao').value)
+    });
     refreshBrandBar();
     alert('Salvo.');
   };
