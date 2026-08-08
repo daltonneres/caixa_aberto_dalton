@@ -61,6 +61,37 @@ const PLANOS = [
   { id: 'completo', nome: 'Plano Completo', valor: 139.90 }
 ];
 function planoById(id) { return PLANOS.find(p => p.id === id); }
+
+// ---------- DESCONTOS POR PERIODICIDADE (pagamento antecipado) ----------
+const DESCONTOS_PERIODICIDADE = [
+  { meses: 3, label: 'Trimestral', desconto: 0.02 },
+  { meses: 6, label: 'Semestral', desconto: 0.04 },
+  { meses: 12, label: 'Anual', desconto: 0.08 }
+];
+function calcularAntecipado(valorMensal, meses, desconto) {
+  const semDesconto = valorMensal * meses;
+  const comDesconto = semDesconto * (1 - desconto);
+  return { semDesconto, comDesconto, economia: semDesconto - comDesconto };
+}
+
+// ---------- CATÁLOGO SUGERIDO DE SERVIÇOS ----------
+// Os que já têm preço definido vêm preenchidos; os outros ficam com preço
+// em branco pra você definir na hora de adicionar ao catálogo.
+const SERVICOS_SUGERIDOS = [
+  { nome: 'Site Institucional com Painel Administrativo', precoUnico: 400, precoMensal: 89.90, descricao: 'Site completo com painel admin, área de login, integração com Firebase e chatbot.' },
+  { nome: 'Landing Page', precoUnico: 250, precoMensal: 29.90, descricao: 'Página única e objetiva, focada em conversão (ex: divulgar um curso ou produto).' },
+  { nome: 'Desenvolvimento de Sites', precoUnico: null, precoMensal: null, descricao: 'Sites modernos, rápidos e responsivos, focados em conversão e presença digital.' },
+  { nome: 'Sistemas Web', precoUnico: null, precoMensal: null, descricao: 'APIs, dashboards e sistemas completos sob medida.' },
+  { nome: 'Desenvolvimento de Games', precoUnico: null, precoMensal: null, descricao: 'Criação de jogos web e experiências interativas com foco em engajamento.' },
+  { nome: 'Automação & Chatbots', precoUnico: null, precoMensal: null, descricao: 'Automação de atendimentos e processos com integração ao WhatsApp.' },
+  { nome: 'Design & Identidade Visual', precoUnico: null, precoMensal: null, descricao: 'Criação de artes, banners, posts e identidade visual profissional.' },
+  { nome: 'Banco de Dados', precoUnico: null, precoMensal: null, descricao: 'Estruturação, otimização e manutenção de bancos de dados seguros.' },
+  { nome: 'Coleta de Leads', precoUnico: null, precoMensal: null, descricao: 'Captação inteligente com formulários, WhatsApp e automações.' },
+  { nome: 'Recuperação de iPhone', precoUnico: null, precoMensal: null, descricao: 'Suporte para desbloqueio, recuperação de acesso e reset com segurança.' },
+  { nome: 'Remoção de Vírus', precoUnico: null, precoMensal: null, descricao: 'Limpeza completa de vírus e malwares, com ou sem formatação.' },
+  { nome: 'Desbloqueio Android', precoUnico: null, precoMensal: null, descricao: 'Recuperação de acesso em aparelhos bloqueados por conta Google.' },
+  { nome: 'Formatação Completa', precoUnico: null, precoMensal: null, descricao: 'Instalação do Windows, drivers, Office e otimização total do sistema.' }
+];
 function formatDocumento(digits) {
   if (!digits) return '';
   if (digits.length === 11) return digits.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
@@ -75,6 +106,8 @@ function formatDocumento(digits) {
 let _clients = [];
 let _charges = [];
 let _meetings = [];
+let _servicos = [];
+let _orcamentos = [];
 let _settings = {};
 let _docRef = null;
 let _unsubscribeSnapshot = null;
@@ -83,11 +116,15 @@ let _saveTimer = null;
 function getClients() { return _clients; }
 function getCharges() { return _charges; }
 function getMeetings() { return _meetings; }
+function getServicos() { return _servicos; }
+function getOrcamentos() { return _orcamentos; }
 function getSettings() { return _settings; }
 
 function saveClients(list) { _clients = list; queuePersist(); }
 function saveCharges(list) { _charges = list; queuePersist(); }
 function saveMeetings(list) { _meetings = list; queuePersist(); }
+function saveServicos(list) { _servicos = list; queuePersist(); }
+function saveOrcamentos(list) { _orcamentos = list; queuePersist(); }
 function saveSettings(s) { _settings = s; queuePersist(); }
 
 function clientById(id) { return getClients().find(c => c.id === id); }
@@ -108,6 +145,8 @@ function queuePersist() {
       clients: _clients,
       charges: _charges,
       meetings: _meetings,
+      servicos: _servicos,
+      orcamentos: _orcamentos,
       settings: _settings,
       updatedAt: new Date().toISOString()
     }, { merge: true }).catch(err => {
@@ -142,6 +181,8 @@ function startFirestoreSync(uid) {
     _clients = data.clients || [];
     _charges = data.charges || [];
     _meetings = data.meetings || [];
+    _servicos = data.servicos || [];
+    _orcamentos = data.orcamentos || [];
     _settings = data.settings || {};
     refreshBrandBar();
     if (currentDetailClientId && clientById(currentDetailClientId)) {
@@ -159,7 +200,7 @@ function stopFirestoreSync() {
   if (_unsubscribeSnapshot) _unsubscribeSnapshot();
   _unsubscribeSnapshot = null;
   _docRef = null;
-  _clients = []; _charges = []; _meetings = []; _settings = {};
+  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _settings = {};
 }
 
 // ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
@@ -287,6 +328,7 @@ function navigate(view) {
     clientes: renderClientes,
     cobrancas: renderCobrancas,
     agenda: renderAgenda,
+    servicos: renderServicos,
     config: renderConfig
   };
   (renderers[view] || renderDashboard)();
@@ -416,13 +458,17 @@ function renderClientes() {
           const totalAberto = getCharges().filter(ch => ch.clientId === c.id && chargeStatus(ch) !== 'pago')
             .reduce((s, ch) => s + Number(ch.valor), 0);
           return `
-          <div class="ledger-row">
+          <div class="ledger-row client-row">
             <div class="ledger-main">
               <div class="ledger-title">${escapeHtml(c.nome)}</div>
               <div class="ledger-sub">${escapeHtml(c.telefone || 'sem telefone')} ${c.email ? '· ' + escapeHtml(c.email) : ''} ${c.cidade ? '· ' + escapeHtml(c.cidade) : ''}</div>
             </div>
-            ${c.plano ? `<span class="stamp-badge stamp-pausado">${escapeHtml(c.plano)}</span>` : ''}
-            <div class="ledger-value ${totalAberto > 0 ? 'brick' : ''}">${totalAberto > 0 ? formatCurrency(totalAberto) + ' em aberto' : 'em dia'}</div>
+            <div class="client-status">
+              ${c.plano ? `<span class="stamp-badge stamp-pausado">${escapeHtml(c.plano)}</span>` : ''}
+              ${totalAberto > 0
+                ? `<span class="stamp-badge stamp-atrasado">${formatCurrency(totalAberto)} em aberto</span>`
+                : `<span class="stamp-badge stamp-pago">Em dia</span>`}
+            </div>
             <div class="ledger-actions">
               <button class="btn btn-primary btn-sm" data-view-client="${c.id}">Ver</button>
               <button class="btn btn-ghost btn-sm" data-edit-client="${c.id}">Editar</button>
@@ -712,6 +758,26 @@ function renderClienteDetalhe(clientId) {
       </div>
     ` : ''}
 
+    ${client.valorPlano ? `
+      <div class="section-title">Pagamento antecipado (com desconto)</div>
+      <div class="ledger" style="margin-bottom:30px;">
+        ${DESCONTOS_PERIODICIDADE.map(d => {
+          const calc = calcularAntecipado(client.valorPlano, d.meses, d.desconto);
+          return `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${d.label} (${d.meses} meses) — ${(d.desconto * 100).toFixed(0)}% de desconto</div>
+              <div class="ledger-sub">De ${formatCurrency(calc.semDesconto)} por ${formatCurrency(calc.comDesconto)} · economia de ${formatCurrency(calc.economia)}</div>
+            </div>
+            <div class="ledger-value">${formatCurrency(calc.comDesconto)}</div>
+            <div class="ledger-actions">
+              <button class="btn btn-ghost btn-sm" data-lancar-antecipado="${d.meses}">Lançar cobrança</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    ` : ''}
+
     <div class="section-title" style="display:flex; align-items:center; justify-content:space-between;">
       <span>O que está sendo desenvolvido</span>
       <button class="btn btn-ghost btn-sm" id="btnNovoProjeto">+ Projeto</button>
@@ -751,6 +817,16 @@ function renderClienteDetalhe(clientId) {
   qs('#btnEditarNoDetalhe').onclick = () => openClientModal(client.id, () => renderClienteDetalhe(client.id));
   qs('#btnNovoProjeto').onclick = () => openProjectModal(client.id);
   qs('#btnNovaReuniaoDetalhe').onclick = () => openMeetingModal(null, client.id, () => renderClienteDetalhe(client.id));
+  qsa('[data-lancar-antecipado]').forEach(b => b.onclick = () => {
+    const meses = Number(b.dataset.lancarAntecipado);
+    const d = DESCONTOS_PERIODICIDADE.find(x => x.meses === meses);
+    const calc = calcularAntecipado(client.valorPlano, d.meses, d.desconto);
+    openChargeModal({
+      clientId: client.id,
+      descricao: `${d.label} (${d.meses} meses) — ${client.plano || 'plano'} com ${(d.desconto * 100).toFixed(0)}% de desconto`,
+      valor: calc.comDesconto
+    }, () => renderClienteDetalhe(client.id));
+  });
   qsa('[data-view-client]').forEach(b => b.onclick = () => renderClienteDetalhe(b.dataset.viewClient));
   qsa('[data-edit-proj]').forEach(b => b.onclick = () => openProjectModal(client.id, b.dataset.editProj));
   qsa('[data-del-proj]').forEach(b => b.onclick = () => {
@@ -880,7 +956,8 @@ function bindChargeActions() {
   });
 }
 
-function openChargeModal() {
+function openChargeModal(presets, onSaved) {
+  presets = presets || {};
   const clients = getClients();
   openModal(`
     <div class="modal-title">Nova cobrança</div>
@@ -888,17 +965,17 @@ function openChargeModal() {
       <div class="field">
         <label class="field-label">Cliente</label>
         <select class="input" id="chCliente" required>
-          ${clients.map(c => `<option value="${c.id}">${escapeHtml(c.nome)}</option>`).join('')}
+          ${clients.map(c => `<option value="${c.id}" ${presets.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}</option>`).join('')}
         </select>
       </div>
       <div class="field">
         <label class="field-label">Descrição</label>
-        <input class="input" id="chDescricao" placeholder="Ex: Mensalidade de agosto" required>
+        <input class="input" id="chDescricao" placeholder="Ex: Mensalidade de agosto" required value="${presets.descricao ? escapeHtml(presets.descricao) : ''}">
       </div>
       <div class="field-row">
         <div class="field">
           <label class="field-label">Valor (R$)</label>
-          <input class="input" id="chValor" type="number" min="0" step="0.01" required>
+          <input class="input" id="chValor" type="number" min="0" step="0.01" required value="${presets.valor != null ? presets.valor.toFixed(2) : ''}">
         </div>
         <div class="field">
           <label class="field-label">Vencimento</label>
@@ -927,7 +1004,7 @@ function openChargeModal() {
     });
     saveCharges(charges);
     closeModal();
-    navigate(currentView);
+    if (onSaved) onSaved(); else navigate(currentView);
   };
 }
 
@@ -1085,11 +1162,11 @@ function openMeetingModal(meetingId, presetClientId, onSaved) {
 // obs: WhatsApp usa *asterisco* pra deixar o texto em negrito
 function buildMessage(charge, client) {
   const settings = getSettings();
-  const empresa = settings.empresaNome ? settings.empresaNome : '';
+  const quemFala = settings.seuNome ? settings.seuNome : '';
   const status = chargeStatus(charge);
   const linhaAtraso = status === 'atrasado' ? `\n⚠️ Essa cobrança está em atraso desde *${formatDateBR(charge.vencimento)}*.` : '';
   const linhaPix = settings.pix ? `\n💳 Chave PIX: *${settings.pix}*` : '';
-  return `👋 Olá, *${client.nome}*! ${empresa ? 'Aqui é da *' + empresa + '*.' : ''}` +
+  return `👋 Olá, *${client.nome}*! ${quemFala ? 'Aqui quem fala é *' + quemFala + '*.' : ''}` +
     `\n\n🧾 Segue sua cobrança referente a: *${charge.descricao}*` +
     `\n💰 Valor: *${formatCurrency(charge.valor)}*` +
     `\n📅 Vencimento: *${formatDateBR(charge.vencimento)}*` +
@@ -1106,8 +1183,8 @@ function openWhatsappModal(chargeId) {
 
 function buildMeetingMessage(meeting, client) {
   const settings = getSettings();
-  const empresa = settings.empresaNome ? settings.empresaNome : '';
-  return `👋 Olá, *${client.nome}*! ${empresa ? 'Aqui é da *' + empresa + '*.' : ''}` +
+  const quemFala = settings.seuNome ? settings.seuNome : '';
+  return `👋 Olá, *${client.nome}*! ${quemFala ? 'Aqui quem fala é *' + quemFala + '*.' : ''}` +
     `\n\n🗓️ Passando pra lembrar da nossa reunião: *${meeting.titulo}*` +
     `\n📅 Data: *${formatDateBR(meeting.data)}${meeting.hora ? ' às ' + meeting.hora : ''}*` +
     `${meeting.local ? '\n📍 Local/link: ' + meeting.local : ''}` +
@@ -1147,6 +1224,321 @@ function openSendWhatsappModal(title, client, defaultMsg) {
   };
 }
 
+// ---------- SERVIÇOS E ORÇAMENTOS ----------
+function renderServicos() {
+  const servicos = getServicos();
+  const orcamentos = getOrcamentos().slice().reverse();
+
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Serviços</div>
+        <div class="view-desc">Catálogo de serviços e gerador de orçamento pra mandar no WhatsApp</div>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-ghost" id="btnNovoServico">+ Novo serviço</button>
+        <button class="btn btn-whatsapp" id="btnGerarOrcamento" ${servicos.length === 0 ? 'disabled title="Cadastre pelo menos um serviço primeiro"' : ''}>💬 Gerar orçamento</button>
+      </div>
+    </div>
+
+    ${servicos.length === 0 ? `
+      <div class="section-title">Catálogo sugerido</div>
+      <p class="view-desc" style="margin-bottom:14px;">
+        Comecei com os serviços que você já oferece. Os que já têm preço definido
+        (baseado na proposta da Ana Luiza) já vêm prontos; os outros ficam sem
+        preço — você define ao adicionar, ou depois clicando em "Editar".
+      </p>
+      <div class="ledger" style="margin-bottom:20px;">
+        ${SERVICOS_SUGERIDOS.map((s, i) => `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(s.nome)}</div>
+              <div class="ledger-sub">${escapeHtml(s.descricao)}</div>
+            </div>
+            ${s.precoUnico != null || s.precoMensal != null
+              ? `<span class="stamp-badge stamp-pago">${s.precoUnico != null ? formatCurrency(s.precoUnico) + ' único' : ''}${s.precoUnico != null && s.precoMensal != null ? ' + ' : ''}${s.precoMensal != null ? formatCurrency(s.precoMensal) + '/mês' : ''}</span>`
+              : `<span class="stamp-badge stamp-pendente">sem preço ainda</span>`}
+            <div class="ledger-actions">
+              <button class="btn btn-primary btn-sm" data-add-sugerido="${i}">+ Adicionar</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <button class="btn btn-ghost btn-sm" id="btnAddTodosSugeridos" style="margin-bottom:30px;">+ Adicionar todos de uma vez</button>
+    ` : `
+      <div class="section-title">Catálogo de serviços</div>
+      <div class="ledger" style="margin-bottom:30px;">
+        ${servicos.map(s => `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(s.nome)}</div>
+              ${s.descricao ? `<div class="ledger-sub">${escapeHtml(s.descricao)}</div>` : ''}
+            </div>
+            ${s.precoUnico != null || s.precoMensal != null
+              ? `<span class="stamp-badge stamp-pago">${s.precoUnico != null ? formatCurrency(s.precoUnico) + ' único' : ''}${s.precoUnico != null && s.precoMensal != null ? ' + ' : ''}${s.precoMensal != null ? formatCurrency(s.precoMensal) + '/mês' : ''}</span>`
+              : `<span class="stamp-badge stamp-pendente">sem preço ainda</span>`}
+            <div class="ledger-actions">
+              <button class="btn btn-ghost btn-sm" data-edit-servico="${s.id}">Editar</button>
+              <button class="btn btn-danger btn-sm" data-del-servico="${s.id}">Excluir</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `}
+
+    <div class="section-title">Histórico de orçamentos enviados</div>
+    ${orcamentos.length === 0 ? emptyState('Nenhum orçamento ainda', 'Clique em "Gerar orçamento" pra montar o primeiro.') : `
+      <div class="ledger">
+        ${orcamentos.map(o => `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(o.nomeContato)}</div>
+              <div class="ledger-sub">${escapeHtml(o.resumo)} · ${formatDateBR(o.criadoEm)}</div>
+            </div>
+            <div class="ledger-value">${o.totalUnico > 0 ? formatCurrency(o.totalUnico) : ''}${o.totalUnico > 0 && o.totalMensal > 0 ? ' + ' : ''}${o.totalMensal > 0 ? formatCurrency(o.totalMensal) + '/mês' : ''}</div>
+            <div class="ledger-actions">
+              <button class="btn btn-whatsapp btn-sm" data-reenviar-orcamento="${o.id}">Reenviar</button>
+              <button class="btn btn-danger btn-sm" data-del-orcamento="${o.id}">Excluir</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `}
+  `;
+
+  qs('#btnNovoServico').onclick = () => openServiceModal();
+  qs('#btnGerarOrcamento').onclick = () => { if (servicos.length > 0) openOrcamentoModal(); };
+  qsa('[data-add-sugerido]').forEach(b => b.onclick = () => {
+    const s = SERVICOS_SUGERIDOS[Number(b.dataset.addSugerido)];
+    saveServicos([...getServicos(), { id: uid(), ...s }]);
+    renderServicos();
+  });
+  const btnTodos = qs('#btnAddTodosSugeridos');
+  if (btnTodos) btnTodos.onclick = () => {
+    saveServicos([...getServicos(), ...SERVICOS_SUGERIDOS.map(s => ({ id: uid(), ...s }))]);
+    renderServicos();
+  };
+  qsa('[data-edit-servico]').forEach(b => b.onclick = () => openServiceModal(b.dataset.editServico));
+  qsa('[data-del-servico]').forEach(b => b.onclick = () => {
+    if (confirm('Excluir este serviço do catálogo?')) {
+      saveServicos(getServicos().filter(s => s.id !== b.dataset.delServico));
+      renderServicos();
+    }
+  });
+  qsa('[data-reenviar-orcamento]').forEach(b => b.onclick = () => {
+    const o = getOrcamentos().find(x => x.id === b.dataset.reenviarOrcamento);
+    openSendWhatsappModal(`Reenviar orçamento — ${o.nomeContato}`, { nome: o.nomeContato, telefone: o.telefoneContato }, o.mensagem);
+  });
+  qsa('[data-del-orcamento]').forEach(b => b.onclick = () => {
+    if (confirm('Excluir este orçamento do histórico?')) {
+      saveOrcamentos(getOrcamentos().filter(o => o.id !== b.dataset.delOrcamento));
+      renderServicos();
+    }
+  });
+}
+
+function openServiceModal(id) {
+  const editing = id ? getServicos().find(s => s.id === id) : null;
+  openModal(`
+    <div class="modal-title">${editing ? 'Editar serviço' : 'Novo serviço'}</div>
+    <form id="servicoForm">
+      <div class="field">
+        <label class="field-label">Nome do serviço</label>
+        <input class="input" id="svNome" required value="${editing ? escapeHtml(editing.nome) : ''}">
+      </div>
+      <div class="field">
+        <label class="field-label">Descrição (opcional)</label>
+        <textarea class="input" id="svDescricao" style="min-height:60px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.descricao || '') : ''}</textarea>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Preço único (opcional)</label>
+          <input class="input" type="number" min="0" step="0.01" id="svPrecoUnico" placeholder="Deixe em branco se não definiu ainda" value="${editing && editing.precoUnico != null ? editing.precoUnico : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">Mensalidade (opcional)</label>
+          <input class="input" type="number" min="0" step="0.01" id="svPrecoMensal" placeholder="Deixe em branco se não definiu ainda" value="${editing && editing.precoMensal != null ? editing.precoMensal : ''}">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnCancelServico">Cancelar</button>
+        <button type="submit" class="btn btn-primary">${editing ? 'Salvar' : 'Adicionar ao catálogo'}</button>
+      </div>
+    </form>
+  `);
+  qs('#btnCancelServico').onclick = closeModal;
+  qs('#servicoForm').onsubmit = (e) => {
+    e.preventDefault();
+    const nome = qs('#svNome').value.trim();
+    if (!nome) return;
+    const precoUnicoRaw = qs('#svPrecoUnico').value;
+    const precoMensalRaw = qs('#svPrecoMensal').value;
+    const data = {
+      nome,
+      descricao: qs('#svDescricao').value.trim(),
+      precoUnico: precoUnicoRaw === '' ? null : Number(precoUnicoRaw),
+      precoMensal: precoMensalRaw === '' ? null : Number(precoMensalRaw)
+    };
+    const servicos = getServicos();
+    if (editing) {
+      const idx = servicos.findIndex(s => s.id === editing.id);
+      servicos[idx] = { ...editing, ...data };
+    } else {
+      servicos.push({ id: uid(), ...data });
+    }
+    saveServicos(servicos);
+    closeModal();
+    renderServicos();
+  };
+}
+
+function buildOrcamentoMessage(nomeContato, itens, plano, observacoes) {
+  const settings = getSettings();
+  const quemFala = settings.seuNome ? settings.seuNome : '';
+  let totalUnico = 0, totalMensal = 0;
+
+  const linhasItens = itens.map(it => {
+    let linha = `\n🧾 *${it.nome}*`;
+    if (it.precoUnico != null) { linha += `\n   💰 ${formatCurrency(it.precoUnico)} (pagamento único)`; totalUnico += it.precoUnico; }
+    if (it.precoMensal != null) { linha += `\n   🔁 ${formatCurrency(it.precoMensal)}/mês`; totalMensal += it.precoMensal; }
+    if (it.precoUnico == null && it.precoMensal == null) { linha += `\n   💬 valor a combinar`; }
+    return linha;
+  }).join('\n');
+
+  let linhaPlano = '';
+  if (plano) {
+    linhaPlano = `\n\n📋 *Plano de suporte:* ${plano.nome} — ${formatCurrency(plano.valor)}/mês`;
+    totalMensal += plano.valor;
+  }
+
+  let linhaTotais = '';
+  if (totalUnico > 0) linhaTotais += `\n💵 *Total inicial:* ${formatCurrency(totalUnico)}`;
+  if (totalMensal > 0) linhaTotais += `\n🔁 *Mensalidade total:* ${formatCurrency(totalMensal)}/mês`;
+
+  const linhaObs = observacoes ? `\n\n📝 ${observacoes}` : '';
+
+  const mensagem = `👋 Olá, *${nomeContato}*! ${quemFala ? 'Aqui quem fala é *' + quemFala + '*.' : ''}` +
+    `\n\nSegue o orçamento que conversamos:` +
+    `${linhasItens}` +
+    `${linhaPlano}` +
+    `${linhaTotais}` +
+    `${linhaObs}` +
+    `\n\n💳 Formas de pagamento: Pix, boleto, cartão de crédito, cartão de débito ou dinheiro.` +
+    `\n📆 Dá pra antecipar trimestral (2% off), semestral (4% off) ou anual (8% off) também 😉` +
+    `\n\n🙏 Qualquer dúvida, é só chamar!`;
+
+  return { mensagem, totalUnico, totalMensal };
+}
+
+function openOrcamentoModal() {
+  const clients = getClients();
+  const servicos = getServicos();
+  openModal(`
+    <div class="modal-title">Gerar orçamento</div>
+    <form id="orcamentoForm">
+      <div class="field">
+        <label class="field-label">Preencher com cliente já cadastrado (opcional)</label>
+        <select class="input" id="ocClienteExistente">
+          <option value="">— novo contato / não cadastrado —</option>
+          ${clients.map(c => `<option value="${c.id}">${escapeHtml(c.nome)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Nome do contato</label>
+          <input class="input" id="ocNome" required>
+        </div>
+        <div class="field">
+          <label class="field-label">WhatsApp</label>
+          <input class="input" id="ocTelefone" placeholder="Ex: 55 45 99999-8888" required>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Serviços deste orçamento</label>
+        <div class="ledger" style="max-height:220px; overflow-y:auto;">
+          ${servicos.map(s => `
+            <label class="service-check">
+              <input type="checkbox" class="oc-servico" value="${s.id}">
+              <span>
+                <strong>${escapeHtml(s.nome)}</strong><br>
+                <span class="service-check-preco">${s.precoUnico != null ? formatCurrency(s.precoUnico) + ' único' : ''}${s.precoUnico != null && s.precoMensal != null ? ' + ' : ''}${s.precoMensal != null ? formatCurrency(s.precoMensal) + '/mês' : ''}${s.precoUnico == null && s.precoMensal == null ? 'sem preço definido' : ''}</span>
+              </span>
+            </label>
+          `).join('')}
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Incluir plano de suporte (opcional)</label>
+        <select class="input" id="ocPlano">
+          <option value="">— nenhum —</option>
+          ${PLANOS.map(p => `<option value="${p.id}">${p.nome} — ${formatCurrency(p.valor)}/mês</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label">Observações (opcional)</label>
+        <textarea class="input" id="ocObs" placeholder="Ex: prazo de entrega, condição especial..." style="min-height:60px; font-family:inherit; font-size:14px;"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnCancelOrcamento">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Gerar mensagem</button>
+      </div>
+    </form>
+  `);
+
+  qs('#ocClienteExistente').onchange = () => {
+    const c = clientById(qs('#ocClienteExistente').value);
+    if (c) {
+      qs('#ocNome').value = c.nome;
+      qs('#ocTelefone').value = c.telefone;
+    }
+  };
+
+  qs('#btnCancelOrcamento').onclick = closeModal;
+  qs('#orcamentoForm').onsubmit = (e) => {
+    e.preventDefault();
+    const nomeContato = qs('#ocNome').value.trim();
+    const telefoneContato = onlyDigits(qs('#ocTelefone').value);
+    if (!nomeContato || telefoneContato.length < 10) {
+      alert('Confira o nome e o WhatsApp do contato.');
+      return;
+    }
+    const idsSelecionados = qsa('.oc-servico:checked').map(cb => cb.value);
+    const planoId = qs('#ocPlano').value;
+    const plano = planoId ? planoById(planoId) : null;
+    if (idsSelecionados.length === 0 && !plano) {
+      alert('Selecione pelo menos um serviço ou um plano de suporte.');
+      return;
+    }
+    const itens = idsSelecionados.map(id => servicos.find(s => s.id === id)).filter(Boolean);
+    const observacoes = qs('#ocObs').value.trim();
+
+    const { mensagem, totalUnico, totalMensal } = buildOrcamentoMessage(nomeContato, itens, plano, observacoes);
+
+    const resumoPartes = [];
+    if (itens.length > 0) resumoPartes.push(`${itens.length} serviço${itens.length > 1 ? 's' : ''}`);
+    if (plano) resumoPartes.push(plano.nome);
+    const resumo = resumoPartes.join(' · ');
+
+    saveOrcamentos([...getOrcamentos(), {
+      id: uid(),
+      nomeContato,
+      telefoneContato,
+      itens: itens.map(it => ({ nome: it.nome, precoUnico: it.precoUnico, precoMensal: it.precoMensal })),
+      planoId: plano ? plano.id : null,
+      planoNome: plano ? plano.nome : null,
+      observacoes,
+      resumo,
+      totalUnico,
+      totalMensal,
+      mensagem,
+      criadoEm: todayISO()
+    }]);
+
+    closeModal();
+    openSendWhatsappModal(`Enviar orçamento — ${nomeContato}`, { nome: nomeContato, telefone: telefoneContato }, mensagem);
+  };
+}
+
 // ---------- CONFIGURAÇÕES ----------
 function renderConfig() {
   const s = getSettings();
@@ -1170,11 +1562,11 @@ function renderConfig() {
     <div class="section-title">Seus dados</div>
     <form id="settingsForm" style="max-width:420px; margin-bottom:32px;">
       <div class="field">
-        <label class="field-label">Seu nome (usado na saudação do painel)</label>
+        <label class="field-label">Seu nome (usado na saudação do painel e nas mensagens de WhatsApp)</label>
         <input class="input" id="sSeuNome" value="${escapeHtml(s.seuNome || '')}">
       </div>
       <div class="field">
-        <label class="field-label">Nome do seu negócio (aparece na mensagem de cobrança)</label>
+        <label class="field-label">Nome do seu negócio (opcional, aparece só no menu lateral)</label>
         <input class="input" id="sEmpresa" value="${escapeHtml(s.empresaNome || '')}">
       </div>
       <div class="field">
