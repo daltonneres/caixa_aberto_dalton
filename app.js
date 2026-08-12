@@ -37,12 +37,27 @@ function daysUntil(dateISO) {
   const alvo = new Date(dateISO + 'T00:00:00');
   return Math.round((alvo - hoje) / 86400000);
 }
-function meetingCountdownLabel(dateISO) {
-  const d = daysUntil(dateISO);
-  if (d < 0) return null;
+function daysUntilLabel(d) {
+  if (d == null || d < 0) return null;
   if (d === 0) return 'Hoje';
   if (d === 1) return 'Amanhã';
   return `Em ${d} dias`;
+}
+function meetingCountdownLabel(dateISO) {
+  return daysUntilLabel(daysUntil(dateISO));
+}
+function daysUntilBirthday(dataNascimentoISO) {
+  if (!dataNascimentoISO) return null;
+  const hoje = new Date(todayISO() + 'T00:00:00');
+  const [, m, d] = dataNascimentoISO.split('-').map(Number);
+  let proximo = new Date(hoje.getFullYear(), m - 1, d);
+  if (proximo < hoje) proximo = new Date(hoje.getFullYear() + 1, m - 1, d);
+  return Math.round((proximo - hoje) / 86400000);
+}
+function formatDataAniversario(dataISO) {
+  if (!dataISO) return '';
+  const [, m, d] = dataISO.split('-');
+  return `${d}/${m}`;
 }
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, c => ({
@@ -53,14 +68,18 @@ function onlyDigits(str) {
   return String(str || '').replace(/\D/g, '');
 }
 
-// ---------- PLANOS FIXOS (Suporte e Evolução) ----------
-const PLANOS = [
-  { id: 'base', nome: 'Plano Base', valor: 89.90 },
-  { id: 'dominio', nome: 'Plano Domínio', valor: 109.90 },
-  { id: 'firebase', nome: 'Plano Firebase', valor: 119.90 },
-  { id: 'completo', nome: 'Plano Completo', valor: 139.90 }
+// ---------- MENSALIDADES (planos de suporte, editáveis pelo menu "Mensalidades") ----------
+// Essa lista é só a sugestão inicial usada pra popular o catálogo na primeira vez.
+// Os ids fixos (base/dominio/firebase/completo) mantêm compatibilidade com clientes
+// que já tinham um desses planos escolhidos antes desse catálogo virar editável.
+const MENSALIDADES_SUGERIDAS = [
+  { id: 'base', nome: 'Plano Base', valor: 90.90, descricao: 'Indicado para sites institucionais e projetos de menor complexidade. Hospedagem simples, Firebase gratuito, manutenção e suporte técnico.' },
+  { id: 'dominio', nome: 'Plano Domínio', valor: 111.90, descricao: 'Tudo do Plano Base, mais domínio personalizado incluso, registro, renovação e configuração de DNS.' },
+  { id: 'firebase', nome: 'Plano Firebase', valor: 123.90, descricao: 'Tudo do Plano Base, mais Firebase com maior capacidade, gerenciamento de banco de dados e monitoramento de recursos.' },
+  { id: 'completo', nome: 'Plano Completo', valor: 140.90, descricao: 'Hospedagem completa, domínio personalizado, Firebase com gerenciamento completo, manutenção contínua e suporte prioritário.' },
+  { id: 'landing-page', nome: 'Landing Page', valor: 29.90, descricao: 'Taxa fixa de manutenção pra quem optou pela Landing Page — hospedagem da página, manutenção técnica básica e backup periódico.' }
 ];
-function planoById(id) { return PLANOS.find(p => p.id === id); }
+function planoById(id) { return getMensalidades().find(p => p.id === id); }
 
 // ---------- DESCONTOS POR PERIODICIDADE (pagamento antecipado) ----------
 const DESCONTOS_PERIODICIDADE = [
@@ -78,7 +97,7 @@ function calcularAntecipado(valorMensal, meses, desconto) {
 // Os que já têm preço definido vêm preenchidos; os outros ficam com preço
 // em branco pra você definir na hora de adicionar ao catálogo.
 const SERVICOS_SUGERIDOS = [
-  { nome: 'Site Institucional com Painel Administrativo', precoUnico: 400, precoMensal: 89.90, descricao: 'Site completo com painel admin, área de login, integração com Firebase e chatbot.' },
+  { nome: 'Site Institucional com Painel Administrativo', precoUnico: 400, precoMensal: 90.90, descricao: 'Site completo com painel admin, área de login, integração com Firebase e chatbot.' },
   { nome: 'Landing Page', precoUnico: 250, precoMensal: 29.90, descricao: 'Página única e objetiva, focada em conversão (ex: divulgar um curso ou produto).' },
   { nome: 'Desenvolvimento de Sites', precoUnico: null, precoMensal: null, descricao: 'Sites modernos, rápidos e responsivos, focados em conversão e presença digital.' },
   { nome: 'Sistemas Web', precoUnico: null, precoMensal: null, descricao: 'APIs, dashboards e sistemas completos sob medida.' },
@@ -108,6 +127,7 @@ let _charges = [];
 let _meetings = [];
 let _servicos = [];
 let _orcamentos = [];
+let _mensalidades = [];
 let _settings = {};
 let _docRef = null;
 let _unsubscribeSnapshot = null;
@@ -118,6 +138,7 @@ function getCharges() { return _charges; }
 function getMeetings() { return _meetings; }
 function getServicos() { return _servicos; }
 function getOrcamentos() { return _orcamentos; }
+function getMensalidades() { return _mensalidades; }
 function getSettings() { return _settings; }
 
 function saveClients(list) { _clients = list; queuePersist(); }
@@ -125,6 +146,7 @@ function saveCharges(list) { _charges = list; queuePersist(); }
 function saveMeetings(list) { _meetings = list; queuePersist(); }
 function saveServicos(list) { _servicos = list; queuePersist(); }
 function saveOrcamentos(list) { _orcamentos = list; queuePersist(); }
+function saveMensalidades(list) { _mensalidades = list; queuePersist(); }
 function saveSettings(s) { _settings = s; queuePersist(); }
 
 function clientById(id) { return getClients().find(c => c.id === id); }
@@ -147,6 +169,7 @@ function queuePersist() {
       meetings: _meetings,
       servicos: _servicos,
       orcamentos: _orcamentos,
+      mensalidades: _mensalidades,
       settings: _settings,
       updatedAt: new Date().toISOString()
     }, { merge: true }).catch(err => {
@@ -183,6 +206,7 @@ function startFirestoreSync(uid) {
     _meetings = data.meetings || [];
     _servicos = data.servicos || [];
     _orcamentos = data.orcamentos || [];
+    _mensalidades = data.mensalidades || [];
     _settings = data.settings || {};
     refreshBrandBar();
     if (currentDetailClientId && clientById(currentDetailClientId)) {
@@ -200,7 +224,7 @@ function stopFirestoreSync() {
   if (_unsubscribeSnapshot) _unsubscribeSnapshot();
   _unsubscribeSnapshot = null;
   _docRef = null;
-  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _settings = {};
+  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _mensalidades = []; _settings = {};
 }
 
 // ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
@@ -329,6 +353,7 @@ function navigate(view) {
     cobrancas: renderCobrancas,
     agenda: renderAgenda,
     servicos: renderServicos,
+    mensalidades: renderMensalidades,
     config: renderConfig
   };
   (renderers[view] || renderDashboard)();
@@ -364,6 +389,8 @@ function renderDashboard() {
     .sort((a, b) => (a.data + a.hora).localeCompare(b.data + b.hora))
     .slice(0, 5);
 
+  const aniversariantesHoje = clients.filter(c => daysUntilBirthday(c.dataNascimento) === 0);
+
   const nomeUsuario = settings.seuNome ? `, ${escapeHtml(settings.seuNome)}` : '';
   const proximaReuniao = proximasReunioes[0] || null;
 
@@ -374,6 +401,13 @@ function renderDashboard() {
         <div class="view-desc">${formatDateLongPT()}</div>
       </div>
     </div>
+
+    ${aniversariantesHoje.length > 0 ? `
+      <div class="today-banner birthday-banner">
+        <strong>🎂 Aniversário hoje:</strong>
+        ${aniversariantesHoje.map(c => `<span class="today-item"><a href="#" data-view-client="${c.id}">${escapeHtml(c.nome)}</a></span>`).join('')}
+      </div>
+    ` : ''}
 
     ${reunioesHoje.length > 0 ? `
       <div class="today-banner">
@@ -439,6 +473,7 @@ function renderDashboard() {
   `;
 
   bindChargeActions();
+  qsa('[data-view-client]').forEach(a => a.onclick = (e) => { e.preventDefault(); renderClienteDetalhe(a.dataset.viewClient); });
 }
 
 // ---------- CLIENTES ----------
@@ -548,11 +583,28 @@ function openClientModal(id, onSaved) {
         <input class="input" type="url" id="cPasta" placeholder="Ex: link do Google Drive, Dropbox..." value="${editing ? escapeHtml(editing.pastaDocumentos || '') : ''}">
       </div>
 
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Data de nascimento (opcional)</label>
+          <input class="input" type="date" id="cNascimento" value="${editing ? (editing.dataNascimento || '') : ''}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Contato de emergência — nome (opcional)</label>
+          <input class="input" id="cEmergenciaNome" value="${editing ? escapeHtml(editing.emergenciaNome || '') : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">Contato de emergência — telefone (opcional)</label>
+          <input class="input" id="cEmergenciaTelefone" placeholder="Com DDD" value="${editing ? escapeHtml(editing.emergenciaTelefone || '') : ''}">
+        </div>
+      </div>
+
       <div class="field">
         <label class="field-label">Plano contratado</label>
         <select class="input" id="cPlanoId">
           <option value="">— nenhum —</option>
-          ${PLANOS.map(p => `<option value="${p.id}" ${editing && editing.planoId === p.id ? 'selected' : ''}>${p.nome} — ${formatCurrency(p.valor)}/mês</option>`).join('')}
+          ${getMensalidades().map(p => `<option value="${p.id}" ${editing && editing.planoId === p.id ? 'selected' : ''}>${p.nome} — ${formatCurrency(p.valor)}/mês</option>`).join('')}
           <option value="personalizado" ${editing && editing.planoId === 'personalizado' ? 'selected' : ''}>Personalizado</option>
         </select>
       </div>
@@ -662,6 +714,9 @@ function openClientModal(id, onSaved) {
       cidade: qs('#cCidade').value.trim(),
       endereco: qs('#cEndereco').value.trim(),
       pastaDocumentos,
+      dataNascimento: qs('#cNascimento').value || null,
+      emergenciaNome: qs('#cEmergenciaNome').value.trim(),
+      emergenciaTelefone: onlyDigits(qs('#cEmergenciaTelefone').value) || null,
       clienteDesde: qs('#cDesde').value || null,
       planoId: planoId || null,
       plano: planoNome,
@@ -717,9 +772,14 @@ function renderClienteDetalhe(clientId) {
           ${client.cidade ? escapeHtml(client.cidade) : ''}${client.endereco ? (client.cidade ? ' · ' : '') + escapeHtml(client.endereco) : ''}
           ${client.clienteDesde ? (client.cidade || client.endereco ? ' · ' : '') + 'Cliente desde ' + formatDateBR(client.clienteDesde) : ''}
         </div>
+        <div class="view-desc">
+          ${client.dataNascimento ? '🎂 ' + formatDataAniversario(client.dataNascimento) : ''}
+          ${client.emergenciaNome ? (client.dataNascimento ? ' · ' : '') + '🆘 ' + escapeHtml(client.emergenciaNome) + (client.emergenciaTelefone ? ' (' + escapeHtml(client.emergenciaTelefone) + ')' : '') : ''}
+        </div>
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         ${client.pastaDocumentos ? `<a class="btn btn-ghost btn-sm" href="${escapeHtml(client.pastaDocumentos)}" target="_blank" rel="noopener">📁 Pasta de documentos</a>` : ''}
+        ${client.dataNascimento ? `<button class="btn btn-whatsapp btn-sm" id="btnFelicitar">🎉 Enviar felicitações</button>` : ''}
         <button class="btn btn-ghost btn-sm" id="btnEditarNoDetalhe">Editar dados</button>
         <button class="btn btn-primary btn-sm" id="btnNovaReuniaoDetalhe">+ Reunião</button>
       </div>
@@ -815,6 +875,8 @@ function renderClienteDetalhe(clientId) {
 
   qs('#btnVoltarClientes').onclick = () => navigate('clientes');
   qs('#btnEditarNoDetalhe').onclick = () => openClientModal(client.id, () => renderClienteDetalhe(client.id));
+  const btnFelicitar = qs('#btnFelicitar');
+  if (btnFelicitar) btnFelicitar.onclick = () => openSendWhatsappModal(`Enviar felicitações — ${client.nome}`, client, buildBirthdayMessage(client));
   qs('#btnNovoProjeto').onclick = () => openProjectModal(client.id);
   qs('#btnNovaReuniaoDetalhe').onclick = () => openMeetingModal(null, client.id, () => renderClienteDetalhe(client.id));
   qsa('[data-lancar-antecipado]').forEach(b => b.onclick = () => {
@@ -890,23 +952,21 @@ function openProjectModal(clientId, projectId) {
 
 // ---------- COBRANÇAS ----------
 function renderCobrancas() {
-  const clients = getClients();
   const charges = getCharges().sort((a, b) => a.vencimento.localeCompare(b.vencimento));
 
   qs('#main').innerHTML = `
     <div class="view-header">
       <div>
         <div class="view-title">Cobranças</div>
-        <div class="view-desc">Lance boletos e cobranças por cliente</div>
+        <div class="view-desc">Lance cobranças de clientes ou vendas avulsas (quem não é cliente fixo)</div>
       </div>
-      <button class="btn btn-primary" id="btnNovaCobranca" ${clients.length === 0 ? 'disabled title="Cadastre um cliente primeiro"' : ''}>+ Nova cobrança</button>
+      <button class="btn btn-primary" id="btnNovaCobranca">+ Nova cobrança</button>
     </div>
-    ${clients.length === 0 ? emptyState('Cadastre um cliente primeiro', 'Você precisa ter pelo menos um cliente para lançar uma cobrança.') :
-      charges.length === 0 ? emptyState('Nenhuma cobrança lançada', 'Clique em "Nova cobrança" para começar.') :
+    ${charges.length === 0 ? emptyState('Nenhuma cobrança lançada', 'Clique em "Nova cobrança" para começar.') :
       renderChargeLedger(charges, { compact: false })}
   `;
 
-  if (clients.length > 0) qs('#btnNovaCobranca').onclick = () => openChargeModal();
+  qs('#btnNovaCobranca').onclick = () => openChargeModal();
   bindChargeActions();
 }
 
@@ -915,20 +975,22 @@ function renderChargeLedger(charges, opts = {}) {
   return `
     <div class="ledger">
       ${charges.map(c => {
-        const client = clientById(c.clientId);
+        const client = c.clientId ? clientById(c.clientId) : null;
+        const nomeExibicao = client ? client.nome : (c.avulsoNome || 'Cliente removido');
+        const temContato = !!(client || (c.avulsoTelefone && c.avulsoTelefone.length >= 10));
         const status = chargeStatus(c);
         const stampClass = { pago: 'stamp-pago', pendente: 'stamp-pendente', atrasado: 'stamp-atrasado' }[status];
         const stampLabel = { pago: 'Pago', pendente: 'Pendente', atrasado: 'Atrasado' }[status];
         return `
         <div class="ledger-row">
           <div class="ledger-main">
-            <div class="ledger-title">${escapeHtml(client ? client.nome : 'Cliente removido')}</div>
+            <div class="ledger-title">${escapeHtml(nomeExibicao)}${!client && c.avulsoNome ? ' <span class="avulso-tag">avulsa</span>' : ''}</div>
             <div class="ledger-sub">${escapeHtml(c.descricao)} · vence ${formatDateBR(c.vencimento)}</div>
           </div>
           <span class="stamp-badge ${stampClass}">${stampLabel}</span>
           <div class="ledger-value">${formatCurrency(c.valor)}</div>
           <div class="ledger-actions">
-            ${status !== 'pago' && client ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">Enviar</button>` : ''}
+            ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">Enviar</button>` : ''}
             ${status !== 'pago' ? `<button class="btn btn-ghost btn-sm" data-pay-charge="${c.id}">Marcar pago</button>` : ''}
             ${!opts.compact ? `<button class="btn btn-danger btn-sm" data-del-charge="${c.id}">Excluir</button>` : ''}
           </div>
@@ -959,15 +1021,41 @@ function bindChargeActions() {
 function openChargeModal(presets, onSaved) {
   presets = presets || {};
   const clients = getClients();
+  const temClientes = clients.length > 0;
+  const modoAvulso = presets.avulso || !temClientes;
+
   openModal(`
     <div class="modal-title">Nova cobrança</div>
     <form id="chargeForm">
-      <div class="field">
+      ${temClientes ? `
+        <div class="field">
+          <label class="field-label">Cobrar de</label>
+          <select class="input" id="chTipo">
+            <option value="cliente" ${!modoAvulso ? 'selected' : ''}>Cliente cadastrado</option>
+            <option value="avulso" ${modoAvulso ? 'selected' : ''}>Venda avulsa (não é cliente fixo)</option>
+          </select>
+        </div>
+      ` : `<p class="view-desc" style="margin:-4px 0 14px;">Você ainda não tem clientes cadastrados — essa cobrança vai ser uma venda avulsa.</p>`}
+
+      <div class="field" id="chClienteRow" style="${modoAvulso ? 'display:none;' : ''}">
         <label class="field-label">Cliente</label>
-        <select class="input" id="chCliente" required>
+        <select class="input" id="chCliente" ${modoAvulso ? '' : 'required'}>
           ${clients.map(c => `<option value="${c.id}" ${presets.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}</option>`).join('')}
         </select>
+        <div id="chPlanoHint" style="margin-top:8px;"></div>
       </div>
+
+      <div class="field-row" id="chAvulsoRow" style="${modoAvulso ? '' : 'display:none;'}">
+        <div class="field">
+          <label class="field-label">Nome</label>
+          <input class="input" id="chAvulsoNome" ${modoAvulso ? 'required' : ''} placeholder="Ex: vizinho, familiar...">
+        </div>
+        <div class="field">
+          <label class="field-label">WhatsApp (opcional)</label>
+          <input class="input" id="chAvulsoTelefone" placeholder="Só se quiser poder enviar a cobrança">
+        </div>
+      </div>
+
       <div class="field">
         <label class="field-label">Descrição</label>
         <input class="input" id="chDescricao" placeholder="Ex: Mensalidade de agosto" required value="${presets.descricao ? escapeHtml(presets.descricao) : ''}">
@@ -988,13 +1076,55 @@ function openChargeModal(presets, onSaved) {
       </div>
     </form>
   `);
+
+  function atualizarHintPlano() {
+    const hintEl = qs('#chPlanoHint');
+    if (!hintEl) return;
+    const clienteSelect = qs('#chCliente');
+    const client = clienteSelect ? clientById(clienteSelect.value) : null;
+    if (client && client.valorPlano != null) {
+      hintEl.innerHTML = `<button type="button" class="btn btn-ghost btn-sm" id="btnUsarPlano">📋 Usar mensalidade do plano${client.plano ? ' — ' + escapeHtml(client.plano) : ''} (${formatCurrency(client.valorPlano)})</button>`;
+      qs('#btnUsarPlano').onclick = () => {
+        qs('#chDescricao').value = `Mensalidade${client.plano ? ' — ' + client.plano : ''}`;
+        qs('#chValor').value = client.valorPlano.toFixed(2);
+      };
+    } else {
+      hintEl.innerHTML = '';
+    }
+  }
+  if (!modoAvulso) atualizarHintPlano();
+  if (temClientes && !modoAvulso) qs('#chCliente').onchange = atualizarHintPlano;
+
+  if (temClientes) {
+    qs('#chTipo').onchange = () => {
+      const avulso = qs('#chTipo').value === 'avulso';
+      qs('#chClienteRow').style.display = avulso ? 'none' : '';
+      qs('#chAvulsoRow').style.display = avulso ? '' : 'none';
+      qs('#chCliente').required = !avulso;
+      qs('#chAvulsoNome').required = avulso;
+      if (!avulso) { qs('#chCliente').onchange = atualizarHintPlano; atualizarHintPlano(); }
+    };
+  }
+
   qs('#btnCancelCharge').onclick = closeModal;
   qs('#chargeForm').onsubmit = (e) => {
     e.preventDefault();
+    const tipo = temClientes ? qs('#chTipo').value : 'avulso';
+    let extra;
+    if (tipo === 'avulso') {
+      const avulsoNome = qs('#chAvulsoNome').value.trim();
+      if (!avulsoNome) { alert('Digite o nome da pessoa.'); return; }
+      const avulsoTelefoneDigits = onlyDigits(qs('#chAvulsoTelefone').value);
+      extra = { clientId: null, avulsoNome, avulsoTelefone: avulsoTelefoneDigits || null };
+    } else {
+      const clientId = qs('#chCliente').value;
+      if (!clientId) { alert('Selecione um cliente.'); return; }
+      extra = { clientId, avulsoNome: null, avulsoTelefone: null };
+    }
     const charges = getCharges();
     charges.push({
       id: uid(),
-      clientId: qs('#chCliente').value,
+      ...extra,
       descricao: qs('#chDescricao').value.trim(),
       valor: Number(qs('#chValor').value),
       vencimento: qs('#chVencimento').value,
@@ -1176,19 +1306,33 @@ function buildMessage(charge, client) {
 
 function openWhatsappModal(chargeId) {
   const charge = getCharges().find(c => c.id === chargeId);
-  const client = clientById(charge.clientId);
-  if (!client) { alert('Cliente não encontrado.'); return; }
+  const client = charge.clientId ? clientById(charge.clientId) : { nome: charge.avulsoNome, telefone: charge.avulsoTelefone };
+  if (!client || !client.telefone) { alert('Essa cobrança não tem um WhatsApp válido pra enviar.'); return; }
   openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client));
 }
 
 function buildMeetingMessage(meeting, client) {
   const settings = getSettings();
   const quemFala = settings.seuNome ? settings.seuNome : '';
+  const contagem = meetingCountdownLabel(meeting.data);
+  const linhaContagem = contagem === 'Hoje' ? '\n⏰ *É hoje!*'
+    : contagem === 'Amanhã' ? '\n⏰ *É amanhã!*'
+    : contagem ? `\n⏰ *${contagem}*` : '';
   return `👋 Olá, *${client.nome}*! ${quemFala ? 'Aqui quem fala é *' + quemFala + '*.' : ''}` +
     `\n\n🗓️ Passando pra lembrar da nossa reunião: *${meeting.titulo}*` +
     `\n📅 Data: *${formatDateBR(meeting.data)}${meeting.hora ? ' às ' + meeting.hora : ''}*` +
+    `${linhaContagem}` +
     `${meeting.local ? '\n📍 Local/link: ' + meeting.local : ''}` +
     `\n\n😊 Qualquer imprevisto, me avisa por aqui. Até lá!`;
+}
+
+function buildBirthdayMessage(client) {
+  const settings = getSettings();
+  const quemFala = settings.seuNome ? settings.seuNome : '';
+  return `🎉 Feliz aniversário, *${client.nome}*! 🎂` +
+    `\n\nDesejo um dia incrível, cheio de alegria e realizações!` +
+    `${quemFala ? '\nUm abraço, *' + quemFala + '*.' : ''}` +
+    `\n\n🥳🎈`;
 }
 
 function openMeetingWhatsappModal(meetingId) {
@@ -1471,7 +1615,7 @@ function openOrcamentoModal() {
         <label class="field-label">Incluir plano de suporte (opcional)</label>
         <select class="input" id="ocPlano">
           <option value="">— nenhum —</option>
-          ${PLANOS.map(p => `<option value="${p.id}">${p.nome} — ${formatCurrency(p.valor)}/mês</option>`).join('')}
+          ${getMensalidades().map(p => `<option value="${p.id}">${p.nome} — ${formatCurrency(p.valor)}/mês</option>`).join('')}
         </select>
       </div>
       <div class="field">
@@ -1536,6 +1680,135 @@ function openOrcamentoModal() {
 
     closeModal();
     openSendWhatsappModal(`Enviar orçamento — ${nomeContato}`, { nome: nomeContato, telefone: telefoneContato }, mensagem);
+  };
+}
+
+// ---------- MENSALIDADES (planos de suporte) ----------
+function renderMensalidades() {
+  const mensalidades = getMensalidades();
+
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Mensalidades</div>
+        <div class="view-desc">Planos de suporte recorrentes — usados no cadastro de cliente e nos orçamentos</div>
+      </div>
+      <button class="btn btn-primary" id="btnNovaMensalidade">+ Novo plano</button>
+    </div>
+
+    ${mensalidades.length === 0 ? `
+      <div class="section-title">Planos sugeridos</div>
+      <p class="view-desc" style="margin-bottom:14px;">
+        Comecei com os planos da sua proposta atual. Pode adicionar, editar valores
+        e nomes à vontade — tudo daqui pra frente é totalmente seu.
+      </p>
+      <div class="ledger" style="margin-bottom:20px;">
+        ${MENSALIDADES_SUGERIDAS.map((p, i) => `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(p.nome)}</div>
+              ${p.descricao ? `<div class="ledger-sub">${escapeHtml(p.descricao)}</div>` : ''}
+            </div>
+            <div class="ledger-value">${formatCurrency(p.valor)}/mês</div>
+            <div class="ledger-actions">
+              <button class="btn btn-primary btn-sm" data-add-mensalidade-sugerida="${i}">+ Adicionar</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <button class="btn btn-ghost btn-sm" id="btnAddTodasMensalidades" style="margin-bottom:30px;">+ Adicionar todos de uma vez</button>
+    ` : `
+      <div class="ledger">
+        ${mensalidades.map(p => `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(p.nome)}</div>
+              ${p.descricao ? `<div class="ledger-sub">${escapeHtml(p.descricao)}</div>` : ''}
+            </div>
+            <div class="ledger-value">${formatCurrency(p.valor)}/mês</div>
+            <div class="ledger-actions">
+              <button class="btn btn-ghost btn-sm" data-edit-mensalidade="${p.id}">Editar</button>
+              <button class="btn btn-danger btn-sm" data-del-mensalidade="${p.id}">Excluir</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:14px;" id="btnAddSugeridasExtra">+ Ver planos sugeridos que faltam</button>
+    `}
+  `;
+
+  qs('#btnNovaMensalidade').onclick = () => openMensalidadeModal();
+  qsa('[data-add-mensalidade-sugerida]').forEach(b => b.onclick = () => {
+    const p = MENSALIDADES_SUGERIDAS[Number(b.dataset.addMensalidadeSugerida)];
+    saveMensalidades([...getMensalidades(), { ...p }]);
+    renderMensalidades();
+  });
+  const btnTodas = qs('#btnAddTodasMensalidades');
+  if (btnTodas) btnTodas.onclick = () => {
+    saveMensalidades([...getMensalidades(), ...MENSALIDADES_SUGERIDAS.map(p => ({ ...p }))]);
+    renderMensalidades();
+  };
+  const btnExtra = qs('#btnAddSugeridasExtra');
+  if (btnExtra) btnExtra.onclick = () => {
+    const idsAtuais = mensalidades.map(p => p.id);
+    const faltando = MENSALIDADES_SUGERIDAS.filter(p => !idsAtuais.includes(p.id));
+    if (faltando.length === 0) { alert('Todos os planos sugeridos já estão no seu catálogo.'); return; }
+    saveMensalidades([...getMensalidades(), ...faltando.map(p => ({ ...p }))]);
+    renderMensalidades();
+  };
+  qsa('[data-edit-mensalidade]').forEach(b => b.onclick = () => openMensalidadeModal(b.dataset.editMensalidade));
+  qsa('[data-del-mensalidade]').forEach(b => b.onclick = () => {
+    const emUso = getClients().filter(c => c.planoId === b.dataset.delMensalidade).length;
+    const msg = emUso > 0
+      ? `${emUso} cliente${emUso > 1 ? 's estão' : ' está'} usando esse plano. Excluir aqui não muda o que já foi salvo no cadastro deles, mas o plano some da lista de opções. Confirma?`
+      : 'Excluir este plano?';
+    if (confirm(msg)) {
+      saveMensalidades(getMensalidades().filter(p => p.id !== b.dataset.delMensalidade));
+      renderMensalidades();
+    }
+  });
+}
+
+function openMensalidadeModal(id) {
+  const editing = id ? getMensalidades().find(p => p.id === id) : null;
+  openModal(`
+    <div class="modal-title">${editing ? 'Editar plano' : 'Novo plano'}</div>
+    <form id="mensalidadeForm">
+      <div class="field">
+        <label class="field-label">Nome do plano</label>
+        <input class="input" id="mnNome" required value="${editing ? escapeHtml(editing.nome) : ''}">
+      </div>
+      <div class="field">
+        <label class="field-label">Valor mensal (R$)</label>
+        <input class="input" type="number" min="0" step="0.01" id="mnValor" required value="${editing ? editing.valor : ''}">
+      </div>
+      <div class="field">
+        <label class="field-label">Descrição (opcional)</label>
+        <textarea class="input" id="mnDescricao" style="min-height:70px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.descricao || '') : ''}</textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnCancelMensalidade">Cancelar</button>
+        <button type="submit" class="btn btn-primary">${editing ? 'Salvar' : 'Adicionar'}</button>
+      </div>
+    </form>
+  `);
+  qs('#btnCancelMensalidade').onclick = closeModal;
+  qs('#mensalidadeForm').onsubmit = (e) => {
+    e.preventDefault();
+    const nome = qs('#mnNome').value.trim();
+    const valor = Number(qs('#mnValor').value);
+    if (!nome || valor < 0) return;
+    const data = { nome, valor, descricao: qs('#mnDescricao').value.trim() };
+    const mensalidades = getMensalidades();
+    if (editing) {
+      const idx = mensalidades.findIndex(p => p.id === editing.id);
+      mensalidades[idx] = { ...editing, ...data };
+    } else {
+      mensalidades.push({ id: uid(), ...data });
+    }
+    saveMensalidades(mensalidades);
+    closeModal();
+    renderMensalidades();
   };
 }
 

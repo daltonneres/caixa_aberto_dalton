@@ -294,6 +294,9 @@ label.field-label{
 .today-banner strong{font-weight:600;}
 .today-item{color:#C7D3CB;}
 .today-item::before{content:'· '; color:#6E8378;}
+.today-item a{color:#fff; text-decoration:underline; text-underline-offset:2px;}
+.birthday-banner{background:var(--brick);}
+.birthday-banner .today-item::before{color:#E8B7A9;}
 
 .countdown-banner{
   display:flex;
@@ -348,6 +351,21 @@ label.field-label{
 .ledger-row:hover{background:var(--paper-alt);}
 .ledger-main{flex:1; min-width:0;}
 .ledger-title{font-weight:600; font-size:14.5px;}
+.avulso-tag{
+  display:inline-block;
+  font-family:var(--font-mono);
+  font-size:9.5px;
+  font-weight:600;
+  text-transform:uppercase;
+  letter-spacing:0.4px;
+  color:var(--ink-soft);
+  background:var(--paper-alt);
+  border:1px solid var(--line);
+  border-radius:3px;
+  padding:1px 6px;
+  vertical-align:middle;
+  margin-left:4px;
+}
 .ledger-sub{font-size:12.5px; color:var(--ink-soft); margin-top:2px;}
 .ledger-value{font-family:var(--font-mono); font-size:15px; font-weight:600; white-space:nowrap;}
 .ledger-actions{display:flex; gap:6px; flex-shrink:0;}
