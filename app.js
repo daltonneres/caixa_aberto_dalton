@@ -73,11 +73,21 @@ function onlyDigits(str) {
 // Os ids fixos (base/dominio/firebase/completo) mantêm compatibilidade com clientes
 // que já tinham um desses planos escolhidos antes desse catálogo virar editável.
 const MENSALIDADES_SUGERIDAS = [
-  { id: 'base', nome: 'Plano Base', valor: 90.90, descricao: 'Indicado para sites institucionais e projetos de menor complexidade. Hospedagem simples, Firebase gratuito, manutenção e suporte técnico.' },
-  { id: 'dominio', nome: 'Plano Domínio', valor: 111.90, descricao: 'Tudo do Plano Base, mais domínio personalizado incluso, registro, renovação e configuração de DNS.' },
-  { id: 'firebase', nome: 'Plano Firebase', valor: 123.90, descricao: 'Tudo do Plano Base, mais Firebase com maior capacidade, gerenciamento de banco de dados e monitoramento de recursos.' },
-  { id: 'completo', nome: 'Plano Completo', valor: 140.90, descricao: 'Hospedagem completa, domínio personalizado, Firebase com gerenciamento completo, manutenção contínua e suporte prioritário.' },
-  { id: 'landing-page', nome: 'Landing Page', valor: 29.90, descricao: 'Taxa fixa de manutenção pra quem optou pela Landing Page — hospedagem da página, manutenção técnica básica e backup periódico.' }
+  // Site com Painel Administrativo
+  { id: 'base', nome: 'Site c/ Painel — Base', valor: 90.90, descricao: 'Site com painel administrativo. Hospedagem simples, Firebase gratuito, manutenção técnica e suporte.' },
+  { id: 'dominio', nome: 'Site c/ Painel — Domínio', valor: 111.90, descricao: 'Tudo do Base, mais domínio personalizado incluso, registro, renovação e configuração de DNS.' },
+  { id: 'firebase', nome: 'Site c/ Painel — Firebase', valor: 123.90, descricao: 'Tudo do Base, mais Firebase com maior capacidade e gerenciamento do banco de dados.' },
+  { id: 'completo', nome: 'Site c/ Painel — Completo', valor: 140.90, descricao: 'Hospedagem completa, domínio, Firebase com gerenciamento completo, manutenção contínua e suporte prioritário.' },
+  // Site Institucional
+  { id: 'site-inst-base', nome: 'Site Institucional — Base', valor: 50.90, descricao: 'Indicado para sites institucionais e projetos de menor complexidade. Hospedagem simples, Firebase gratuito, manutenção e suporte.' },
+  { id: 'site-inst-dominio', nome: 'Site Institucional — Domínio', valor: 82.90, descricao: 'Tudo do Base, mais domínio personalizado incluso, registro, renovação e configuração de DNS.' },
+  { id: 'site-inst-firebase', nome: 'Site Institucional — Firebase', valor: 92.00, descricao: 'Tudo do Base, mais Firebase com maior capacidade e gerenciamento do banco de dados.' },
+  { id: 'site-inst-completo', nome: 'Site Institucional — Completo', valor: 120.90, descricao: 'Hospedagem completa, domínio, Firebase com gerenciamento completo, manutenção contínua e suporte prioritário.' },
+  // Landing Page
+  { id: 'landing-page', nome: 'Landing Page — Base', valor: 29.90, descricao: 'Hospedagem simples, Firebase gratuito, manutenção técnica e suporte.' },
+  { id: 'landing-dominio', nome: 'Landing Page — Domínio', valor: 60.90, descricao: 'Tudo do Base, mais domínio personalizado incluso, registro, renovação e configuração de DNS.' },
+  { id: 'landing-firebase', nome: 'Landing Page — Firebase', valor: 70.90, descricao: 'Tudo do Base, mais Firebase com maior capacidade e gerenciamento do banco de dados.' },
+  { id: 'landing-completo', nome: 'Landing Page — Completo', valor: 100.00, descricao: 'Hospedagem completa, domínio, Firebase com gerenciamento completo, manutenção contínua e suporte prioritário.' }
 ];
 function planoById(id) { return getMensalidades().find(p => p.id === id); }
 
@@ -97,8 +107,9 @@ function calcularAntecipado(valorMensal, meses, desconto) {
 // Os que já têm preço definido vêm preenchidos; os outros ficam com preço
 // em branco pra você definir na hora de adicionar ao catálogo.
 const SERVICOS_SUGERIDOS = [
-  { nome: 'Site Institucional com Painel Administrativo', precoUnico: 400, precoMensal: 90.90, descricao: 'Site completo com painel admin, área de login, integração com Firebase e chatbot.' },
-  { nome: 'Landing Page', precoUnico: 250, precoMensal: 29.90, descricao: 'Página única e objetiva, focada em conversão (ex: divulgar um curso ou produto).' },
+  { nome: 'Site com Painel Administrativo', precoUnico: 400, precoMensal: null, descricao: 'Site completo com painel admin, área de login, integração com Firebase e chatbot. Mensalidade de suporte à parte — veja as opções na aba Mensalidades.' },
+  { nome: 'Site Institucional', precoUnico: null, precoMensal: null, descricao: 'Site institucional sem painel administrativo, mais simples e direto. Mensalidade de suporte à parte — veja as opções na aba Mensalidades.' },
+  { nome: 'Landing Page', precoUnico: 250, precoMensal: null, descricao: 'Página única e objetiva, focada em conversão (ex: divulgar um curso ou produto). Mensalidade de suporte à parte — veja as opções na aba Mensalidades.' },
   { nome: 'Desenvolvimento de Sites', precoUnico: null, precoMensal: null, descricao: 'Sites modernos, rápidos e responsivos, focados em conversão e presença digital.' },
   { nome: 'Sistemas Web', precoUnico: null, precoMensal: null, descricao: 'APIs, dashboards e sistemas completos sob medida.' },
   { nome: 'Desenvolvimento de Games', precoUnico: null, precoMensal: null, descricao: 'Criação de jogos web e experiências interativas com foco em engajamento.' },
