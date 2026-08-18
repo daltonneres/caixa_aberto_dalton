@@ -87,7 +87,20 @@ const MENSALIDADES_SUGERIDAS = [
   { id: 'landing-page', nome: 'Landing Page — Base', valor: 29.90, descricao: 'Hospedagem simples, Firebase gratuito, manutenção técnica e suporte.' },
   { id: 'landing-dominio', nome: 'Landing Page — Domínio', valor: 60.90, descricao: 'Tudo do Base, mais domínio personalizado incluso, registro, renovação e configuração de DNS.' },
   { id: 'landing-firebase', nome: 'Landing Page — Firebase', valor: 70.90, descricao: 'Tudo do Base, mais Firebase com maior capacidade e gerenciamento do banco de dados.' },
-  { id: 'landing-completo', nome: 'Landing Page — Completo', valor: 100.00, descricao: 'Hospedagem completa, domínio, Firebase com gerenciamento completo, manutenção contínua e suporte prioritário.' }
+  { id: 'landing-completo', nome: 'Landing Page — Completo', valor: 100.00, descricao: 'Hospedagem completa, domínio, Firebase com gerenciamento completo, manutenção contínua e suporte prioritário.' },
+  // Sistema Web de Vendas
+  { id: 'vendas-base', nome: 'Sistema Vendas — Base', valor: 56.90, descricao: 'Sem DBA e sem domínio — ideal para começar de forma simples. Hospedagem simples, manutenção e suporte técnico.' },
+  { id: 'vendas-dominio', nome: 'Sistema Vendas — Domínio', valor: 116.60, descricao: 'Tudo do Base, mais domínio personalizado incluso, registro, renovação e configuração de DNS.' },
+  { id: 'vendas-dba', nome: 'Sistema Vendas — DBA', valor: 131.50, descricao: 'Tudo do Base, mais gerenciamento do banco de dados, otimização de performance e monitoramento de recursos.' },
+  { id: 'vendas-api', nome: 'Sistema Vendas — API', valor: 141.10, descricao: 'Tudo do Base, mais integração com APIs externas, webhooks e suporte à conexão com sistemas de terceiros.' },
+  { id: 'vendas-completo', nome: 'Sistema Vendas — Completo', valor: 162.10, descricao: 'Domínio, banco de dados, APIs, hospedagem completa, manutenção contínua e suporte prioritário — tudo incluso.' },
+  // E-Commerce
+  { id: 'ecommerce-base', nome: 'E-Commerce — Base', valor: 79.90, descricao: 'Sem DBA e sem domínio — ideal para começar de forma simples. Hospedagem simples, manutenção e suporte técnico.' },
+  { id: 'ecommerce-dominio', nome: 'E-Commerce — Domínio', valor: 149.90, descricao: 'Tudo do Base, mais domínio personalizado incluso, registro, renovação e configuração de DNS.' },
+  { id: 'ecommerce-dba', nome: 'E-Commerce — DBA', valor: 179.90, descricao: 'Tudo do Base, mais gerenciamento do banco de dados, otimização de performance e monitoramento de recursos.' },
+  { id: 'ecommerce-api', nome: 'E-Commerce — API', valor: 219.90, descricao: 'Tudo do Base, mais integração com APIs externas, ERP e gateways de pagamento.' },
+  { id: 'ecommerce-marketplace', nome: 'E-Commerce — Marketplace', valor: 259.90, descricao: 'Tudo do Base, mais integração com marketplaces (Mercado Livre e outros), sincronização de catálogo e estoque entre canais.' },
+  { id: 'ecommerce-completo', nome: 'E-Commerce — Completo', valor: 349.90, descricao: 'Domínio, DBA completo, APIs, ERP, gateways, marketplaces, hospedagem completa, manutenção contínua e suporte prioritário — tudo incluso.' }
 ];
 function planoById(id) { return getMensalidades().find(p => p.id === id); }
 
@@ -110,6 +123,8 @@ const SERVICOS_SUGERIDOS = [
   { nome: 'Site com Painel Administrativo', precoUnico: 400, precoMensal: null, descricao: 'Site completo com painel admin, área de login, integração com Firebase e chatbot. Mensalidade de suporte à parte — veja as opções na aba Mensalidades.' },
   { nome: 'Site Institucional', precoUnico: null, precoMensal: null, descricao: 'Site institucional sem painel administrativo, mais simples e direto. Mensalidade de suporte à parte — veja as opções na aba Mensalidades.' },
   { nome: 'Landing Page', precoUnico: 250, precoMensal: null, descricao: 'Página única e objetiva, focada em conversão (ex: divulgar um curso ou produto). Mensalidade de suporte à parte — veja as opções na aba Mensalidades.' },
+  { nome: 'Sistema Web de Vendas', precoUnico: 380, precoMensal: null, descricao: 'Sistema de vendas sob medida (pagamento em 2x: 50% no início, 50% na entrega). Mensalidade de suporte à parte — veja as opções na aba Mensalidades.' },
+  { nome: 'E-Commerce', precoUnico: 1490, precoMensal: null, descricao: 'Plataforma completa de e-commerce: loja virtual, pagamentos, estoque, integrações com ERP e marketplaces (pagamento em 2x: 50% no início, 50% na entrega). Mensalidade de suporte à parte — veja as opções na aba Mensalidades.' },
   { nome: 'Desenvolvimento de Sites', precoUnico: null, precoMensal: null, descricao: 'Sites modernos, rápidos e responsivos, focados em conversão e presença digital.' },
   { nome: 'Sistemas Web', precoUnico: null, precoMensal: null, descricao: 'APIs, dashboards e sistemas completos sob medida.' },
   { nome: 'Desenvolvimento de Games', precoUnico: null, precoMensal: null, descricao: 'Criação de jogos web e experiências interativas com foco em engajamento.' },
@@ -1567,7 +1582,12 @@ function buildOrcamentoMessage(nomeContato, itens, plano, observacoes) {
   }
 
   let linhaTotais = '';
-  if (totalUnico > 0) linhaTotais += `\n💵 *Total inicial:* ${formatCurrency(totalUnico)}`;
+  if (totalUnico > 0) {
+    const metade = totalUnico / 2;
+    linhaTotais += `\n💵 *Valor de contratação:* ${formatCurrency(totalUnico)}`;
+    linhaTotais += `\n   • 50% ao iniciar o projeto: ${formatCurrency(metade)}`;
+    linhaTotais += `\n   • 50% na entrega final: ${formatCurrency(metade)}`;
+  }
   if (totalMensal > 0) linhaTotais += `\n🔁 *Mensalidade total:* ${formatCurrency(totalMensal)}/mês`;
 
   const linhaObs = observacoes ? `\n\n📝 ${observacoes}` : '';
