@@ -104,6 +104,27 @@ const MENSALIDADES_SUGERIDAS = [
 ];
 function planoById(id) { return getMensalidades().find(p => p.id === id); }
 
+// ---------- STATUS DE ACOMPANHAMENTO DO ORÇAMENTO ----------
+const STATUS_ORCAMENTO = [
+  { id: 'nao_enviado', label: 'Não enviado', classe: 'stamp-pausado' },
+  { id: 'enviado', label: 'Enviado', classe: 'stamp-pendente' },
+  { id: 'aguardando_retorno', label: 'Aguardando retorno', classe: 'stamp-pendente' },
+  { id: 'sem_retorno', label: 'Sem retorno', classe: 'stamp-pausado' },
+  { id: 'desistiu', label: 'Desistiu', classe: 'stamp-atrasado' },
+  { id: 'fechado', label: 'Fechado (virou cliente)', classe: 'stamp-pago' }
+];
+function statusOrcamentoInfo(id) {
+  return STATUS_ORCAMENTO.find(s => s.id === id) || STATUS_ORCAMENTO[0];
+}
+function updateOrcamentoStatus(id, status) {
+  const list = getOrcamentos();
+  const idx = list.findIndex(o => o.id === id);
+  if (idx > -1) {
+    list[idx] = { ...list[idx], status };
+    saveOrcamentos(list);
+  }
+}
+
 // ---------- DESCONTOS POR PERIODICIDADE (pagamento antecipado) ----------
 const DESCONTOS_PERIODICIDADE = [
   { meses: 3, label: 'Trimestral', desconto: 0.02 },
@@ -1368,7 +1389,7 @@ function openMeetingWhatsappModal(meetingId) {
   openSendWhatsappModal(`Enviar lembrete — ${client.nome}`, client, buildMeetingMessage(meeting, client));
 }
 
-function openSendWhatsappModal(title, client, defaultMsg) {
+function openSendWhatsappModal(title, client, defaultMsg, onSent) {
   openModal(`
     <div class="modal-title">${escapeHtml(title)}</div>
     <div class="field">
@@ -1380,8 +1401,8 @@ function openSendWhatsappModal(title, client, defaultMsg) {
       <input class="input" id="waPhone" value="${escapeHtml(client.telefone)}">
     </div>
     <div class="modal-actions">
-      <button type="button" class="btn btn-ghost" id="btnCancelWa">Cancelar</button>
-      <button type="button" class="btn btn-whatsapp" id="btnOpenWa">Abrir no WhatsApp</button>
+      <button type="button" class="btn btn-ghost" id="btnCancelWa">Não enviar agora</button>
+      <button type="button" class="btn btn-whatsapp" id="btnOpenWa">Enviar no WhatsApp</button>
     </div>
   `);
   qs('#btnCancelWa').onclick = closeModal;
@@ -1391,6 +1412,7 @@ function openSendWhatsappModal(title, client, defaultMsg) {
     if (phone.length < 10) { alert('Número de WhatsApp inválido.'); return; }
     window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
     closeModal();
+    if (onSent) onSent();
   };
 }
 
@@ -1407,7 +1429,9 @@ function renderServicos() {
       </div>
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn btn-ghost" id="btnNovoServico">+ Novo serviço</button>
-        <button class="btn btn-whatsapp" id="btnGerarOrcamento" ${servicos.length === 0 ? 'disabled title="Cadastre pelo menos um serviço primeiro"' : ''}>💬 Gerar orçamento</button>
+        ${servicos.length > 0 ? `<button class="btn btn-ghost" id="btnSyncServicos">🔄 Atualizar valores</button>` : ''}
+        <button class="btn btn-ghost" id="btnOrcamentoSimples">✏️ Orçamento simples</button>
+        <button class="btn btn-whatsapp" id="btnGerarOrcamento" ${servicos.length === 0 ? 'disabled title="Cadastre pelo menos um serviço primeiro"' : ''}>💬 Orçamento pelo catálogo</button>
       </div>
     </div>
 
@@ -1456,28 +1480,42 @@ function renderServicos() {
       </div>
     `}
 
-    <div class="section-title">Histórico de orçamentos enviados</div>
-    ${orcamentos.length === 0 ? emptyState('Nenhum orçamento ainda', 'Clique em "Gerar orçamento" pra montar o primeiro.') : `
+    <div class="section-title">Histórico de orçamentos</div>
+    ${orcamentos.length === 0 ? emptyState('Nenhum orçamento ainda', 'Clique em "Orçamento pelo catálogo" ou "Orçamento simples" pra montar o primeiro.') : `
+      <div class="orcamento-status-resumo">
+        ${STATUS_ORCAMENTO.map(s => {
+          const qtd = orcamentos.filter(o => (o.status || 'nao_enviado') === s.id).length;
+          return qtd > 0 ? `<span class="stamp-badge ${s.classe}">${qtd} · ${s.label}</span>` : '';
+        }).join('')}
+      </div>
       <div class="ledger">
-        ${orcamentos.map(o => `
+        ${orcamentos.map(o => {
+          const status = statusOrcamentoInfo(o.status || 'nao_enviado');
+          return `
           <div class="ledger-row">
             <div class="ledger-main">
               <div class="ledger-title">${escapeHtml(o.nomeContato)}</div>
               <div class="ledger-sub">${escapeHtml(o.resumo)} · ${formatDateBR(o.criadoEm)}</div>
             </div>
             <div class="ledger-value">${o.totalUnico > 0 ? formatCurrency(o.totalUnico) : ''}${o.totalUnico > 0 && o.totalMensal > 0 ? ' + ' : ''}${o.totalMensal > 0 ? formatCurrency(o.totalMensal) + '/mês' : ''}</div>
+            <select class="input orcamento-status-select ${status.classe}" data-status-orcamento="${o.id}">
+              ${STATUS_ORCAMENTO.map(s => `<option value="${s.id}" ${(o.status || 'nao_enviado') === s.id ? 'selected' : ''}>${s.label}</option>`).join('')}
+            </select>
             <div class="ledger-actions">
               <button class="btn btn-whatsapp btn-sm" data-reenviar-orcamento="${o.id}">Reenviar</button>
               <button class="btn btn-danger btn-sm" data-del-orcamento="${o.id}">Excluir</button>
             </div>
-          </div>
-        `).join('')}
+          </div>`;
+        }).join('')}
       </div>
     `}
   `;
 
   qs('#btnNovoServico').onclick = () => openServiceModal();
   qs('#btnGerarOrcamento').onclick = () => { if (servicos.length > 0) openOrcamentoModal(); };
+  qs('#btnOrcamentoSimples').onclick = () => openOrcamentoSimplesModal();
+  const btnSyncServicos = qs('#btnSyncServicos');
+  if (btnSyncServicos) btnSyncServicos.onclick = () => sincronizarServicosSugeridos();
   qsa('[data-add-sugerido]').forEach(b => b.onclick = () => {
     const s = SERVICOS_SUGERIDOS[Number(b.dataset.addSugerido)];
     saveServicos([...getServicos(), { id: uid(), ...s }]);
@@ -1495,9 +1533,16 @@ function renderServicos() {
       renderServicos();
     }
   });
+  qsa('[data-status-orcamento]').forEach(sel => sel.onchange = () => {
+    updateOrcamentoStatus(sel.dataset.statusOrcamento, sel.value);
+    renderServicos();
+  });
   qsa('[data-reenviar-orcamento]').forEach(b => b.onclick = () => {
     const o = getOrcamentos().find(x => x.id === b.dataset.reenviarOrcamento);
-    openSendWhatsappModal(`Reenviar orçamento — ${o.nomeContato}`, { nome: o.nomeContato, telefone: o.telefoneContato }, o.mensagem);
+    openSendWhatsappModal(`Reenviar orçamento — ${o.nomeContato}`, { nome: o.nomeContato, telefone: o.telefoneContato }, o.mensagem, () => {
+      updateOrcamentoStatus(o.id, 'enviado');
+      renderServicos();
+    });
   });
   qsa('[data-del-orcamento]').forEach(b => b.onclick = () => {
     if (confirm('Excluir este orçamento do histórico?')) {
@@ -1505,6 +1550,24 @@ function renderServicos() {
       renderServicos();
     }
   });
+}
+
+function sincronizarServicosSugeridos() {
+  const atuais = getServicos();
+  let atualizados = 0;
+  const novos = atuais.map(s => {
+    const sugestao = SERVICOS_SUGERIDOS.find(x => x.nome === s.nome);
+    if (sugestao && (sugestao.precoUnico !== s.precoUnico || sugestao.precoMensal !== s.precoMensal)) {
+      atualizados++;
+      return { ...s, precoUnico: sugestao.precoUnico, precoMensal: sugestao.precoMensal, descricao: sugestao.descricao };
+    }
+    return s;
+  });
+  if (atualizados === 0) { alert('Todos os serviços já estão com os valores mais recentes do catálogo sugerido.'); return; }
+  if (confirm(`Isso vai atualizar o valor de ${atualizados} serviço${atualizados > 1 ? 's' : ''} (mesmo nome do catálogo sugerido) pro valor mais recente. Serviços com nome diferente do sugerido não são afetados. Confirma?`)) {
+    saveServicos(novos);
+    renderServicos();
+  }
 }
 
 function openServiceModal(id) {
@@ -1694,7 +1757,7 @@ function openOrcamentoModal() {
     if (plano) resumoPartes.push(plano.nome);
     const resumo = resumoPartes.join(' · ');
 
-    saveOrcamentos([...getOrcamentos(), {
+    const novoOrcamento = {
       id: uid(),
       nomeContato,
       telefoneContato,
@@ -1706,11 +1769,129 @@ function openOrcamentoModal() {
       totalUnico,
       totalMensal,
       mensagem,
+      status: 'nao_enviado',
       criadoEm: todayISO()
-    }]);
+    };
+    saveOrcamentos([...getOrcamentos(), novoOrcamento]);
 
     closeModal();
-    openSendWhatsappModal(`Enviar orçamento — ${nomeContato}`, { nome: nomeContato, telefone: telefoneContato }, mensagem);
+    openSendWhatsappModal(`Enviar orçamento — ${nomeContato}`, { nome: nomeContato, telefone: telefoneContato }, mensagem, () => {
+      updateOrcamentoStatus(novoOrcamento.id, 'enviado');
+    });
+  };
+}
+
+function openOrcamentoSimplesModal() {
+  const clients = getClients();
+  openModal(`
+    <div class="modal-title">Orçamento simples</div>
+    <p class="view-desc" style="margin:-10px 0 16px;">Digite os itens e valores na hora — não usa o catálogo, então não tem risco de somar nada em duplicidade.</p>
+    <form id="orcamentoSimplesForm">
+      <div class="field">
+        <label class="field-label">Preencher com cliente já cadastrado (opcional)</label>
+        <select class="input" id="ocsClienteExistente">
+          <option value="">— novo contato / não cadastrado —</option>
+          ${clients.map(c => `<option value="${c.id}">${escapeHtml(c.nome)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Nome do contato</label>
+          <input class="input" id="ocsNome" required>
+        </div>
+        <div class="field">
+          <label class="field-label">WhatsApp</label>
+          <input class="input" id="ocsTelefone" placeholder="Ex: 55 45 99999-8888" required>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Itens do orçamento</label>
+        <div id="ocsItens"></div>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnAddItemOrcamento" style="margin-top:8px;">+ Adicionar item</button>
+      </div>
+      <div class="field">
+        <label class="field-label">Observações (opcional)</label>
+        <textarea class="input" id="ocsObs" placeholder="Ex: prazo de entrega, condição especial..." style="min-height:60px; font-family:inherit; font-size:14px;"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnCancelOrcamentoSimples">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Gerar mensagem</button>
+      </div>
+    </form>
+  `);
+
+  function addItemRow(nome, valor, tipo) {
+    const row = document.createElement('div');
+    row.className = 'oc-item-row';
+    row.innerHTML = `
+      <input class="input oc-item-nome" placeholder="Descrição (ex: Landing Page)" value="${nome ? escapeHtml(nome) : ''}">
+      <input class="input oc-item-valor" type="number" min="0" step="0.01" placeholder="Valor" value="${valor || ''}">
+      <select class="input oc-item-tipo">
+        <option value="unico" ${tipo !== 'mensal' ? 'selected' : ''}>Único</option>
+        <option value="mensal" ${tipo === 'mensal' ? 'selected' : ''}>Mensal</option>
+      </select>
+      <button type="button" class="btn btn-danger btn-sm oc-item-remove">×</button>
+    `;
+    row.querySelector('.oc-item-remove').onclick = () => row.remove();
+    qs('#ocsItens').appendChild(row);
+  }
+  addItemRow();
+  qs('#btnAddItemOrcamento').onclick = () => addItemRow();
+
+  qs('#ocsClienteExistente').onchange = () => {
+    const c = clientById(qs('#ocsClienteExistente').value);
+    if (c) { qs('#ocsNome').value = c.nome; qs('#ocsTelefone').value = c.telefone; }
+  };
+
+  qs('#btnCancelOrcamentoSimples').onclick = closeModal;
+  qs('#orcamentoSimplesForm').onsubmit = (e) => {
+    e.preventDefault();
+    const nomeContato = qs('#ocsNome').value.trim();
+    const telefoneContato = onlyDigits(qs('#ocsTelefone').value);
+    if (!nomeContato || telefoneContato.length < 10) {
+      alert('Confira o nome e o WhatsApp do contato.');
+      return;
+    }
+
+    const itens = [];
+    qsa('#ocsItens .oc-item-row').forEach(row => {
+      const nome = row.querySelector('.oc-item-nome').value.trim();
+      const valorRaw = row.querySelector('.oc-item-valor').value;
+      const tipo = row.querySelector('.oc-item-tipo').value;
+      if (!nome || valorRaw === '') return;
+      const valor = Number(valorRaw);
+      itens.push({ nome, precoUnico: tipo === 'unico' ? valor : null, precoMensal: tipo === 'mensal' ? valor : null });
+    });
+    if (itens.length === 0) {
+      alert('Adicione pelo menos um item com descrição e valor.');
+      return;
+    }
+
+    const observacoes = qs('#ocsObs').value.trim();
+    const { mensagem, totalUnico, totalMensal } = buildOrcamentoMessage(nomeContato, itens, null, observacoes);
+    const resumo = `${itens.length} ite${itens.length > 1 ? 'ns' : 'm'} (personalizado)`;
+
+    const novoOrcamento = {
+      id: uid(),
+      nomeContato,
+      telefoneContato,
+      itens,
+      planoId: null,
+      planoNome: null,
+      observacoes,
+      resumo,
+      totalUnico,
+      totalMensal,
+      mensagem,
+      status: 'nao_enviado',
+      criadoEm: todayISO()
+    };
+    saveOrcamentos([...getOrcamentos(), novoOrcamento]);
+
+    closeModal();
+    openSendWhatsappModal(`Enviar orçamento — ${nomeContato}`, { nome: nomeContato, telefone: telefoneContato }, mensagem, () => {
+      updateOrcamentoStatus(novoOrcamento.id, 'enviado');
+    });
   };
 }
 
@@ -1724,7 +1905,10 @@ function renderMensalidades() {
         <div class="view-title">Mensalidades</div>
         <div class="view-desc">Planos de suporte recorrentes — usados no cadastro de cliente e nos orçamentos</div>
       </div>
-      <button class="btn btn-primary" id="btnNovaMensalidade">+ Novo plano</button>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        ${mensalidades.length > 0 ? `<button class="btn btn-ghost" id="btnSyncMensalidades">🔄 Atualizar valores</button>` : ''}
+        <button class="btn btn-primary" id="btnNovaMensalidade">+ Novo plano</button>
+      </div>
     </div>
 
     ${mensalidades.length === 0 ? `
@@ -1769,6 +1953,8 @@ function renderMensalidades() {
   `;
 
   qs('#btnNovaMensalidade').onclick = () => openMensalidadeModal();
+  const btnSyncMensalidades = qs('#btnSyncMensalidades');
+  if (btnSyncMensalidades) btnSyncMensalidades.onclick = () => sincronizarMensalidadesSugeridas();
   qsa('[data-add-mensalidade-sugerida]').forEach(b => b.onclick = () => {
     const p = MENSALIDADES_SUGERIDAS[Number(b.dataset.addMensalidadeSugerida)];
     saveMensalidades([...getMensalidades(), { ...p }]);
@@ -1798,6 +1984,24 @@ function renderMensalidades() {
       renderMensalidades();
     }
   });
+}
+
+function sincronizarMensalidadesSugeridas() {
+  const atuais = getMensalidades();
+  let atualizados = 0;
+  const novos = atuais.map(p => {
+    const sugestao = MENSALIDADES_SUGERIDAS.find(x => x.id === p.id);
+    if (sugestao && (sugestao.valor !== p.valor || sugestao.nome !== p.nome)) {
+      atualizados++;
+      return { ...p, nome: sugestao.nome, valor: sugestao.valor, descricao: sugestao.descricao };
+    }
+    return p;
+  });
+  if (atualizados === 0) { alert('Todos os planos já estão com os valores mais recentes do catálogo sugerido.'); return; }
+  if (confirm(`Isso vai atualizar ${atualizados} plano${atualizados > 1 ? 's' : ''} pro valor mais recente do catálogo sugerido. Planos criados por você (fora da sugestão) não são afetados. Confirma?`)) {
+    saveMensalidades(novos);
+    renderMensalidades();
+  }
 }
 
 function openMensalidadeModal(id) {
