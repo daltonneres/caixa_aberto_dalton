@@ -1503,6 +1503,7 @@ function renderServicos() {
             </select>
             <div class="ledger-actions">
               <button class="btn btn-whatsapp btn-sm" data-reenviar-orcamento="${o.id}">Reenviar</button>
+              <button class="btn btn-ghost btn-sm" data-editar-orcamento="${o.id}">Editar</button>
               <button class="btn btn-danger btn-sm" data-del-orcamento="${o.id}">Excluir</button>
             </div>
           </div>`;
@@ -1544,6 +1545,7 @@ function renderServicos() {
       renderServicos();
     });
   });
+  qsa('[data-editar-orcamento]').forEach(b => b.onclick = () => openOrcamentoSimplesModal(b.dataset.editarOrcamento));
   qsa('[data-del-orcamento]').forEach(b => b.onclick = () => {
     if (confirm('Excluir este orçamento do histórico?')) {
       saveOrcamentos(getOrcamentos().filter(o => o.id !== b.dataset.delOrcamento));
@@ -1781,12 +1783,15 @@ function openOrcamentoModal() {
   };
 }
 
-function openOrcamentoSimplesModal() {
+function openOrcamentoSimplesModal(editingId) {
   const clients = getClients();
+  const editing = editingId ? getOrcamentos().find(o => o.id === editingId) : null;
+
   openModal(`
-    <div class="modal-title">Orçamento simples</div>
-    <p class="view-desc" style="margin:-10px 0 16px;">Digite os itens e valores na hora — não usa o catálogo, então não tem risco de somar nada em duplicidade.</p>
+    <div class="modal-title">${editing ? 'Editar orçamento' : 'Orçamento simples'}</div>
+    <p class="view-desc" style="margin:-10px 0 16px;">${editing ? 'Ajuste os itens, valores ou dados do contato à vontade.' : 'Digite os itens e valores na hora — não usa o catálogo, então não tem risco de somar nada em duplicidade.'}</p>
     <form id="orcamentoSimplesForm">
+      ${editing ? '' : `
       <div class="field">
         <label class="field-label">Preencher com cliente já cadastrado (opcional)</label>
         <select class="input" id="ocsClienteExistente">
@@ -1794,14 +1799,15 @@ function openOrcamentoSimplesModal() {
           ${clients.map(c => `<option value="${c.id}">${escapeHtml(c.nome)}</option>`).join('')}
         </select>
       </div>
+      `}
       <div class="field-row">
         <div class="field">
           <label class="field-label">Nome do contato</label>
-          <input class="input" id="ocsNome" required>
+          <input class="input" id="ocsNome" required value="${editing ? escapeHtml(editing.nomeContato) : ''}">
         </div>
         <div class="field">
           <label class="field-label">WhatsApp</label>
-          <input class="input" id="ocsTelefone" placeholder="Ex: 55 45 99999-8888" required>
+          <input class="input" id="ocsTelefone" placeholder="Ex: 55 45 99999-8888" required value="${editing ? escapeHtml(editing.telefoneContato) : ''}">
         </div>
       </div>
       <div class="field">
@@ -1811,11 +1817,11 @@ function openOrcamentoSimplesModal() {
       </div>
       <div class="field">
         <label class="field-label">Observações (opcional)</label>
-        <textarea class="input" id="ocsObs" placeholder="Ex: prazo de entrega, condição especial..." style="min-height:60px; font-family:inherit; font-size:14px;"></textarea>
+        <textarea class="input" id="ocsObs" placeholder="Ex: prazo de entrega, condição especial..." style="min-height:60px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.observacoes || '') : ''}</textarea>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="btnCancelOrcamentoSimples">Cancelar</button>
-        <button type="submit" class="btn btn-primary">Gerar mensagem</button>
+        <button type="submit" class="btn btn-primary">${editing ? 'Salvar alterações' : 'Gerar mensagem'}</button>
       </div>
     </form>
   `);
@@ -1835,13 +1841,20 @@ function openOrcamentoSimplesModal() {
     row.querySelector('.oc-item-remove').onclick = () => row.remove();
     qs('#ocsItens').appendChild(row);
   }
-  addItemRow();
+
+  if (editing && editing.itens && editing.itens.length > 0) {
+    editing.itens.forEach(it => addItemRow(it.nome, it.precoUnico != null ? it.precoUnico : it.precoMensal, it.precoMensal != null ? 'mensal' : 'unico'));
+  } else {
+    addItemRow();
+  }
   qs('#btnAddItemOrcamento').onclick = () => addItemRow();
 
-  qs('#ocsClienteExistente').onchange = () => {
-    const c = clientById(qs('#ocsClienteExistente').value);
-    if (c) { qs('#ocsNome').value = c.nome; qs('#ocsTelefone').value = c.telefone; }
-  };
+  if (!editing) {
+    qs('#ocsClienteExistente').onchange = () => {
+      const c = clientById(qs('#ocsClienteExistente').value);
+      if (c) { qs('#ocsNome').value = c.nome; qs('#ocsTelefone').value = c.telefone; }
+    };
+  }
 
   qs('#btnCancelOrcamentoSimples').onclick = closeModal;
   qs('#orcamentoSimplesForm').onsubmit = (e) => {
@@ -1870,6 +1883,16 @@ function openOrcamentoSimplesModal() {
     const observacoes = qs('#ocsObs').value.trim();
     const { mensagem, totalUnico, totalMensal } = buildOrcamentoMessage(nomeContato, itens, null, observacoes);
     const resumo = `${itens.length} ite${itens.length > 1 ? 'ns' : 'm'} (personalizado)`;
+
+    if (editing) {
+      const lista = getOrcamentos();
+      const idx = lista.findIndex(o => o.id === editing.id);
+      lista[idx] = { ...editing, nomeContato, telefoneContato, itens, observacoes, resumo, totalUnico, totalMensal, mensagem };
+      saveOrcamentos(lista);
+      closeModal();
+      renderServicos();
+      return;
+    }
 
     const novoOrcamento = {
       id: uid(),
