@@ -59,6 +59,18 @@ function formatDataAniversario(dataISO) {
   const [, m, d] = dataISO.split('-');
   return `${d}/${m}`;
 }
+function aniversarioContrato(clienteDesdeISO) {
+  if (!clienteDesdeISO) return null;
+  const hoje = new Date(todayISO() + 'T00:00:00');
+  const [anoInicio, m, d] = clienteDesdeISO.split('-').map(Number);
+  const anos = hoje.getFullYear() - anoInicio;
+  if (anos < 1) return null;
+  let proximo = new Date(hoje.getFullYear(), m - 1, d);
+  if (proximo < hoje) proximo = new Date(hoje.getFullYear() + 1, m - 1, d);
+  const dias = Math.round((proximo - hoje) / 86400000);
+  const anosCompletos = proximo.getFullYear() - anoInicio;
+  return { dias, anos: anosCompletos };
+}
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -120,7 +132,7 @@ function updateOrcamentoStatus(id, status) {
   const list = getOrcamentos();
   const idx = list.findIndex(o => o.id === id);
   if (idx > -1) {
-    list[idx] = { ...list[idx], status };
+    list[idx] = { ...list[idx], status, atualizadoEm: todayISO() };
     saveOrcamentos(list);
   }
 }
@@ -174,6 +186,7 @@ let _charges = [];
 let _meetings = [];
 let _servicos = [];
 let _orcamentos = [];
+let _contratos = [];
 let _mensalidades = [];
 let _settings = {};
 let _docRef = null;
@@ -185,6 +198,7 @@ function getCharges() { return _charges; }
 function getMeetings() { return _meetings; }
 function getServicos() { return _servicos; }
 function getOrcamentos() { return _orcamentos; }
+function getContratos() { return _contratos; }
 function getMensalidades() { return _mensalidades; }
 function getSettings() { return _settings; }
 
@@ -193,6 +207,7 @@ function saveCharges(list) { _charges = list; queuePersist(); }
 function saveMeetings(list) { _meetings = list; queuePersist(); }
 function saveServicos(list) { _servicos = list; queuePersist(); }
 function saveOrcamentos(list) { _orcamentos = list; queuePersist(); }
+function saveContratos(list) { _contratos = list; queuePersist(); }
 function saveMensalidades(list) { _mensalidades = list; queuePersist(); }
 function saveSettings(s) { _settings = s; queuePersist(); }
 
@@ -216,6 +231,7 @@ function queuePersist() {
       meetings: _meetings,
       servicos: _servicos,
       orcamentos: _orcamentos,
+      contratos: _contratos,
       mensalidades: _mensalidades,
       settings: _settings,
       updatedAt: new Date().toISOString()
@@ -243,6 +259,7 @@ function showSyncError() {
 // mantém a página onde o usuário estava, mesmo quando os dados
 // chegam de novo pelo Firestore (própria escrita ou outro aparelho)
 let currentDetailClientId = null;
+let _orcamentoView = 'lista';
 
 function startFirestoreSync(uid) {
   _docRef = db.collection('users').doc(uid).collection('app').doc('data');
@@ -253,8 +270,13 @@ function startFirestoreSync(uid) {
     _meetings = data.meetings || [];
     _servicos = data.servicos || [];
     _orcamentos = data.orcamentos || [];
+    _contratos = data.contratos || [];
     _mensalidades = data.mensalidades || [];
     _settings = data.settings || {};
+    if (_settings.tema) {
+      localStorage.setItem('ca_tema', _settings.tema);
+      applyTheme(_settings.tema);
+    }
     refreshBrandBar();
     if (currentDetailClientId && clientById(currentDetailClientId)) {
       renderClienteDetalhe(currentDetailClientId);
@@ -271,7 +293,7 @@ function stopFirestoreSync() {
   if (_unsubscribeSnapshot) _unsubscribeSnapshot();
   _unsubscribeSnapshot = null;
   _docRef = null;
-  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _mensalidades = []; _settings = {};
+  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _settings = {};
 }
 
 // ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
@@ -401,6 +423,8 @@ function navigate(view) {
     agenda: renderAgenda,
     servicos: renderServicos,
     mensalidades: renderMensalidades,
+    relatorios: renderRelatorios,
+    contratos: renderContratos,
     config: renderConfig
   };
   (renderers[view] || renderDashboard)();
@@ -437,6 +461,9 @@ function renderDashboard() {
     .slice(0, 5);
 
   const aniversariantesHoje = clients.filter(c => daysUntilBirthday(c.dataNascimento) === 0);
+  const contratosHoje = clients
+    .map(c => ({ c, info: aniversarioContrato(c.clienteDesde) }))
+    .filter(x => x.info && x.info.dias === 0);
 
   const nomeUsuario = settings.seuNome ? `, ${escapeHtml(settings.seuNome)}` : '';
   const proximaReuniao = proximasReunioes[0] || null;
@@ -453,6 +480,13 @@ function renderDashboard() {
       <div class="today-banner birthday-banner">
         <strong>🎂 Aniversário hoje:</strong>
         ${aniversariantesHoje.map(c => `<span class="today-item"><a href="#" data-view-client="${c.id}">${escapeHtml(c.nome)}</a></span>`).join('')}
+      </div>
+    ` : ''}
+
+    ${contratosHoje.length > 0 ? `
+      <div class="today-banner contract-banner">
+        <strong>🎉 Aniversário de contrato hoje:</strong>
+        ${contratosHoje.map(x => `<span class="today-item"><a href="#" data-view-client="${x.c.id}">${escapeHtml(x.c.nome)} — ${x.info.anos} ano${x.info.anos > 1 ? 's' : ''}</a></span>`).join('')}
       </div>
     ` : ''}
 
@@ -1039,6 +1073,9 @@ function renderChargeLedger(charges, opts = {}) {
           <div class="ledger-actions">
             ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">Enviar</button>` : ''}
             ${status !== 'pago' ? `<button class="btn btn-ghost btn-sm" data-pay-charge="${c.id}">Marcar pago</button>` : ''}
+            ${status === 'pago' ? `<button class="btn btn-ghost btn-sm" data-recibo-charge="${c.id}">🧾 Recibo</button>` : ''}
+            ${status === 'pago' && c.comprovanteLink ? `<a class="btn btn-ghost btn-sm" href="${escapeHtml(c.comprovanteLink)}" target="_blank" rel="noopener">📎 Comprovante</a>` : ''}
+            ${status === 'pago' && !c.comprovanteLink ? `<button class="btn btn-ghost btn-sm" data-add-comprovante="${c.id}">📎 + Comprovante</button>` : ''}
             ${!opts.compact ? `<button class="btn btn-danger btn-sm" data-del-charge="${c.id}">Excluir</button>` : ''}
           </div>
         </div>`;
@@ -1049,20 +1086,120 @@ function renderChargeLedger(charges, opts = {}) {
 
 function bindChargeActions() {
   qsa('[data-send-charge]').forEach(b => b.onclick = () => openWhatsappModal(b.dataset.sendCharge));
-  qsa('[data-pay-charge]').forEach(b => b.onclick = () => {
-    const charges = getCharges();
-    const idx = charges.findIndex(c => c.id === b.dataset.payCharge);
-    charges[idx].status = 'pago';
-    charges[idx].dataPagamento = todayISO();
-    saveCharges(charges);
-    navigate(currentView);
-  });
+  qsa('[data-pay-charge]').forEach(b => b.onclick = () => openMarkPaidModal(b.dataset.payCharge));
+  qsa('[data-add-comprovante]').forEach(b => b.onclick = () => openComprovanteModal(b.dataset.addComprovante));
+  qsa('[data-recibo-charge]').forEach(b => b.onclick = () => gerarReciboPDF(b.dataset.reciboCharge));
   qsa('[data-del-charge]').forEach(b => b.onclick = () => {
     if (confirm('Excluir esta cobrança?')) {
       saveCharges(getCharges().filter(c => c.id !== b.dataset.delCharge));
       navigate(currentView);
     }
   });
+}
+
+function openMarkPaidModal(chargeId) {
+  openModal(`
+    <div class="modal-title">Marcar como pago</div>
+    <div class="field">
+      <label class="field-label">Data do pagamento</label>
+      <input class="input" type="date" id="mpData" value="${todayISO()}">
+    </div>
+    <div class="field">
+      <label class="field-label">Link do comprovante (opcional)</label>
+      <input class="input" type="url" id="mpComprovante" placeholder="Ex: print do PIX no Google Drive/Fotos">
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" id="btnCancelPago">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="btnConfirmPago">Confirmar</button>
+    </div>
+  `);
+  qs('#btnCancelPago').onclick = closeModal;
+  qs('#btnConfirmPago').onclick = () => {
+    let link = qs('#mpComprovante').value.trim();
+    if (link && !/^https?:\/\//i.test(link)) link = 'https://' + link;
+    const charges = getCharges();
+    const idx = charges.findIndex(c => c.id === chargeId);
+    charges[idx].status = 'pago';
+    charges[idx].dataPagamento = qs('#mpData').value || todayISO();
+    charges[idx].comprovanteLink = link || null;
+    saveCharges(charges);
+    closeModal();
+    navigate(currentView);
+  };
+}
+
+function openComprovanteModal(chargeId) {
+  openModal(`
+    <div class="modal-title">Adicionar comprovante</div>
+    <p class="view-desc" style="margin:-8px 0 14px;">Cole o link de onde o print/nota está salvo (Google Drive, Google Fotos, Dropbox...).</p>
+    <div class="field">
+      <label class="field-label">Link do comprovante</label>
+      <input class="input" type="url" id="cpLink" required>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" id="btnCancelComprovante">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="btnSalvarComprovante">Salvar</button>
+    </div>
+  `);
+  qs('#btnCancelComprovante').onclick = closeModal;
+  qs('#btnSalvarComprovante').onclick = () => {
+    let link = qs('#cpLink').value.trim();
+    if (!link) { alert('Cole o link do comprovante.'); return; }
+    if (!/^https?:\/\//i.test(link)) link = 'https://' + link;
+    const charges = getCharges();
+    const idx = charges.findIndex(c => c.id === chargeId);
+    charges[idx].comprovanteLink = link;
+    saveCharges(charges);
+    closeModal();
+    navigate(currentView);
+  };
+}
+
+async function gerarReciboPDF(chargeId) {
+  const charge = getCharges().find(c => c.id === chargeId);
+  const client = charge.clientId ? clientById(charge.clientId) : null;
+  const nomeCliente = client ? client.nome : (charge.avulsoNome || 'Cliente avulso');
+  const settings = getSettings();
+
+  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([420, 560]);
+  const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const fontRegular = await doc.embedFont(StandardFonts.Helvetica);
+  const inkColor = rgb(0.086, 0.137, 0.122);
+  const softColor = rgb(0.29, 0.35, 0.32);
+  let y = 500;
+
+  page.drawText('RECIBO', { x: 40, y, size: 22, font: fontBold, color: inkColor });
+  y -= 18;
+  page.drawText(settings.empresaNome || settings.seuNome || 'Caixa Aberto', { x: 40, y, size: 11, font: fontRegular, color: softColor });
+  y -= 40;
+
+  function linha(label, valor, tamanho = 11) {
+    page.drawText(label, { x: 40, y, size: 9, font: fontBold, color: softColor });
+    y -= 15;
+    page.drawText(valor, { x: 40, y, size: tamanho, font: fontRegular, color: inkColor });
+    y -= 28;
+  }
+
+  linha('RECEBEMOS DE', nomeCliente);
+  linha('REFERENTE A', charge.descricao);
+  linha('VALOR', formatCurrency(charge.valor), 16);
+  linha('DATA DO PAGAMENTO', formatDateBR(charge.dataPagamento || todayISO()));
+  if (settings.pix) linha('CHAVE PIX', settings.pix);
+
+  page.drawLine({ start: { x: 40, y: y - 4 }, end: { x: 380, y: y - 4 }, thickness: 0.5, color: softColor });
+  y -= 24;
+  page.drawText(`Emitido em ${formatDateBR(todayISO())} pelo Caixa Aberto.`, { x: 40, y, size: 8, font: fontRegular, color: softColor });
+
+  const bytes = await doc.save();
+  const blob = new Blob([bytes], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `recibo-${nomeCliente.replace(/\s+/g, '-').toLowerCase()}-${charge.dataPagamento || todayISO()}.pdf`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function openChargeModal(presets, onSaved) {
@@ -1480,7 +1617,15 @@ function renderServicos() {
       </div>
     `}
 
-    <div class="section-title">Histórico de orçamentos</div>
+    <div class="section-title" style="display:flex; align-items:center; justify-content:space-between;">
+      <span>Histórico de orçamentos</span>
+      ${orcamentos.length > 0 ? `
+        <div style="display:flex; gap:6px;">
+          <button class="btn btn-sm ${_orcamentoView === 'lista' ? 'btn-primary' : 'btn-ghost'}" id="btnViewLista">Lista</button>
+          <button class="btn btn-sm ${_orcamentoView === 'funil' ? 'btn-primary' : 'btn-ghost'}" id="btnViewFunil">Funil</button>
+        </div>
+      ` : ''}
+    </div>
     ${orcamentos.length === 0 ? emptyState('Nenhum orçamento ainda', 'Clique em "Orçamento pelo catálogo" ou "Orçamento simples" pra montar o primeiro.') : `
       <div class="orcamento-status-resumo">
         ${STATUS_ORCAMENTO.map(s => {
@@ -1488,6 +1633,24 @@ function renderServicos() {
           return qtd > 0 ? `<span class="stamp-badge ${s.classe}">${qtd} · ${s.label}</span>` : '';
         }).join('')}
       </div>
+
+      ${(() => {
+        const seguirCom = orcamentos.filter(o => {
+          const st = o.status || 'nao_enviado';
+          if (st !== 'enviado' && st !== 'aguardando_retorno') return false;
+          const dias = daysUntil(o.atualizadoEm || o.criadoEm);
+          return dias <= -3;
+        });
+        if (seguirCom.length === 0) return '';
+        return `
+          <div class="followup-banner">
+            <strong>🔔 ${seguirCom.length} orçamento${seguirCom.length > 1 ? 's' : ''} sem novidade há 3+ dias:</strong>
+            ${seguirCom.map(o => `<span class="today-item">${escapeHtml(o.nomeContato)} <button class="btn btn-whatsapp btn-sm" data-followup-orcamento="${o.id}" style="margin-left:6px;">Mandar um oi</button></span>`).join('')}
+          </div>
+        `;
+      })()}
+
+      ${_orcamentoView === 'lista' ? `
       <div class="ledger">
         ${orcamentos.map(o => {
           const status = statusOrcamentoInfo(o.status || 'nao_enviado');
@@ -1509,6 +1672,31 @@ function renderServicos() {
           </div>`;
         }).join('')}
       </div>
+      ` : `
+      <div class="kanban-board">
+        ${STATUS_ORCAMENTO.map(s => {
+          const itens = orcamentos.filter(o => (o.status || 'nao_enviado') === s.id);
+          return `
+          <div class="kanban-column">
+            <div class="kanban-column-header ${s.classe}">${s.label} <span>${itens.length}</span></div>
+            ${itens.map(o => `
+              <div class="kanban-card">
+                <div class="ledger-title" style="font-size:13px;">${escapeHtml(o.nomeContato)}</div>
+                <div class="ledger-sub">${escapeHtml(o.resumo)}</div>
+                <div class="ledger-value" style="font-size:13px; margin:6px 0;">${o.totalUnico > 0 ? formatCurrency(o.totalUnico) : ''}${o.totalUnico > 0 && o.totalMensal > 0 ? ' + ' : ''}${o.totalMensal > 0 ? formatCurrency(o.totalMensal) + '/mês' : ''}</div>
+                <select class="input orcamento-status-select ${s.classe}" data-status-orcamento="${o.id}" style="width:100%; max-width:none; margin-bottom:6px;">
+                  ${STATUS_ORCAMENTO.map(s2 => `<option value="${s2.id}" ${(o.status || 'nao_enviado') === s2.id ? 'selected' : ''}>${s2.label}</option>`).join('')}
+                </select>
+                <div class="ledger-actions">
+                  <button class="btn btn-whatsapp btn-sm" data-reenviar-orcamento="${o.id}">Reenviar</button>
+                  <button class="btn btn-ghost btn-sm" data-editar-orcamento="${o.id}">Editar</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>`;
+        }).join('')}
+      </div>
+      `}
     `}
   `;
 
@@ -1533,6 +1721,17 @@ function renderServicos() {
       saveServicos(getServicos().filter(s => s.id !== b.dataset.delServico));
       renderServicos();
     }
+  });
+  const btnViewLista = qs('#btnViewLista');
+  const btnViewFunil = qs('#btnViewFunil');
+  if (btnViewLista) btnViewLista.onclick = () => { _orcamentoView = 'lista'; renderServicos(); };
+  if (btnViewFunil) btnViewFunil.onclick = () => { _orcamentoView = 'funil'; renderServicos(); };
+  qsa('[data-followup-orcamento]').forEach(b => b.onclick = () => {
+    const o = getOrcamentos().find(x => x.id === b.dataset.followupOrcamento);
+    const settings = getSettings();
+    const quemFala = settings.seuNome || '';
+    const msg = `👋 Oi, *${o.nomeContato}*! ${quemFala ? 'Aqui é o ' + quemFala + '.' : ''} Passando só pra saber se você já conseguiu dar uma olhada no orçamento que te mandei. Fico à disposição pra qualquer dúvida! 🙂`;
+    openSendWhatsappModal(`Follow-up — ${o.nomeContato}`, { nome: o.nomeContato, telefone: o.telefoneContato }, msg);
   });
   qsa('[data-status-orcamento]').forEach(sel => sel.onchange = () => {
     updateOrcamentoStatus(sel.dataset.statusOrcamento, sel.value);
@@ -1772,6 +1971,7 @@ function openOrcamentoModal() {
       totalMensal,
       mensagem,
       status: 'nao_enviado',
+      atualizadoEm: todayISO(),
       criadoEm: todayISO()
     };
     saveOrcamentos([...getOrcamentos(), novoOrcamento]);
@@ -1907,6 +2107,7 @@ function openOrcamentoSimplesModal(editingId) {
       totalMensal,
       mensagem,
       status: 'nao_enviado',
+      atualizadoEm: todayISO(),
       criadoEm: todayISO()
     };
     saveOrcamentos([...getOrcamentos(), novoOrcamento]);
@@ -2070,6 +2271,373 @@ function openMensalidadeModal(id) {
   };
 }
 
+// ---------- RELATÓRIOS ----------
+function renderRelatorios() {
+  const charges = getCharges();
+  const hoje = new Date();
+  const mesAtualKey = todayISO().slice(0, 7);
+  const mesAnterior = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
+  const mesAnteriorKey = `${mesAnterior.getFullYear()}-${String(mesAnterior.getMonth() + 1).padStart(2, '0')}`;
+
+  function resumoDoMes(mesKey) {
+    const pagas = charges.filter(c => c.status === 'pago' && (c.dataPagamento || '').slice(0, 7) === mesKey);
+    const recebido = pagas.reduce((s, c) => s + Number(c.valor), 0);
+    return { recebido, qtdPagas: pagas.length };
+  }
+
+  const atual = resumoDoMes(mesAtualKey);
+  const anterior = resumoDoMes(mesAnteriorKey);
+  const variacao = anterior.recebido > 0 ? ((atual.recebido - anterior.recebido) / anterior.recebido) * 100 : null;
+
+  const emAberto = charges.filter(c => chargeStatus(c) !== 'pago')
+    .reduce((s, c) => s + Number(c.valor), 0);
+  const atrasado = charges.filter(c => chargeStatus(c) === 'atrasado')
+    .reduce((s, c) => s + Number(c.valor), 0);
+
+  const chargesDoMes = charges.filter(c => c.status === 'pago' && (c.dataPagamento || '').slice(0, 7) === mesAtualKey)
+    .sort((a, b) => (a.dataPagamento || '').localeCompare(b.dataPagamento || ''));
+
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Relatórios</div>
+        <div class="view-desc">Resumo financeiro do mês e exportação pra imposto de renda / contador</div>
+      </div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-ghost" id="btnExportCSV">⬇️ Exportar CSV</button>
+      </div>
+    </div>
+
+    <div class="cards-grid">
+      <div class="stat-card">
+        <div class="stat-label">Recebido este mês</div>
+        <div class="stat-value emerald">${formatCurrency(atual.recebido)}</div>
+        ${variacao != null ? `<div class="view-desc" style="margin-top:4px;">${variacao >= 0 ? '▲' : '▼'} ${Math.abs(variacao).toFixed(0)}% vs. mês anterior</div>` : ''}
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Recebido mês anterior</div>
+        <div class="stat-value">${formatCurrency(anterior.recebido)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Em aberto (todos)</div>
+        <div class="stat-value amber">${formatCurrency(emAberto)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Atrasado</div>
+        <div class="stat-value brick">${formatCurrency(atrasado)}</div>
+      </div>
+    </div>
+
+    <div class="section-title">Recebimentos deste mês (${chargesDoMes.length})</div>
+    ${chargesDoMes.length === 0 ? emptyState('Nada recebido ainda este mês', 'Assim que marcar cobranças como pagas, elas aparecem aqui.') : `
+      <div class="ledger">
+        ${chargesDoMes.map(c => {
+          const client = c.clientId ? clientById(c.clientId) : null;
+          const nome = client ? client.nome : (c.avulsoNome || 'Cliente removido');
+          return `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(nome)}</div>
+              <div class="ledger-sub">${escapeHtml(c.descricao)} · pago em ${formatDateBR(c.dataPagamento)}</div>
+            </div>
+            <div class="ledger-value">${formatCurrency(c.valor)}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    `}
+  `;
+
+  qs('#btnExportCSV').onclick = () => exportarRelatorioCSV(charges);
+}
+
+function exportarRelatorioCSV(charges) {
+  const linhas = [['Cliente', 'Descrição', 'Valor', 'Status', 'Vencimento', 'Data do pagamento']];
+  charges.forEach(c => {
+    const client = c.clientId ? clientById(c.clientId) : null;
+    const nome = client ? client.nome : (c.avulsoNome || 'Cliente removido');
+    linhas.push([
+      nome,
+      c.descricao,
+      String(c.valor).replace('.', ','),
+      chargeStatus(c),
+      formatDateBR(c.vencimento),
+      c.dataPagamento ? formatDateBR(c.dataPagamento) : ''
+    ]);
+  });
+  const csv = linhas.map(l => l.map(v => `"${String(v).replace(/"/g, '""')}"`).join(';')).join('\n');
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `relatorio-caixa-aberto-${todayISO()}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ---------- CONTRATOS ----------
+const CONTRATADO_PADRAO = {
+  contratado_nome: 'Dalton José Neres',
+  contratado_profissao: 'Desenvolvedor Full Stack | Desenvolvedor de Software',
+  contratado_cpf: '122.515.479-08',
+  contratado_endereco: 'Linha Nova União, 0, Zona Rural',
+  contratado_cidade_uf: 'Salto do Lontra – PR',
+  contratado_cep: '85670-000',
+  contratado_email: 'dev.neresdalton@gmail.com',
+  contratado_telefone: '(46) 99971-1937'
+};
+function getContratadoInfo() {
+  return { ...CONTRATADO_PADRAO, ...(getSettings().contratado || {}) };
+}
+const MARCADOR_PENDENTE = '【A PREENCHER】';
+
+function renderContratos() {
+  const contratos = getContratos().slice().reverse();
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Contratos</div>
+        <div class="view-desc">Gera o contrato já com os dados do cliente e do plano — o resto (prazos, percentuais, cronograma, valores detalhados) vem marcado pra você completar no Word.</div>
+      </div>
+      <button class="btn btn-primary" id="btnNovoContrato">+ Gerar contrato</button>
+    </div>
+    ${contratos.length === 0 ? emptyState('Nenhum contrato gerado ainda', 'Clique em "Gerar contrato" pra montar o primeiro.') : `
+      <div class="ledger">
+        ${contratos.map(c => `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(c.contratante_nome || 'Sem nome')}</div>
+              <div class="ledger-sub">${c.planoNome ? escapeHtml(c.planoNome) + ' · ' : ''}gerado em ${formatDateBR(c.criadoEm)}</div>
+            </div>
+            <div class="ledger-actions">
+              <button class="btn btn-ghost btn-sm" data-baixar-docx="${c.id}">⬇️ Word</button>
+              <button class="btn btn-ghost btn-sm" data-baixar-pdf="${c.id}">⬇️ PDF</button>
+              <button class="btn btn-ghost btn-sm" data-editar-contrato="${c.id}">Editar</button>
+              <button class="btn btn-danger btn-sm" data-del-contrato="${c.id}">Excluir</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `}
+  `;
+  qs('#btnNovoContrato').onclick = () => openContratoModal();
+  qsa('[data-baixar-docx]').forEach(b => b.onclick = () => gerarContratoDocx(getContratos().find(x => x.id === b.dataset.baixarDocx)));
+  qsa('[data-baixar-pdf]').forEach(b => b.onclick = () => gerarContratoPDF(getContratos().find(x => x.id === b.dataset.baixarPdf)));
+  qsa('[data-editar-contrato]').forEach(b => b.onclick = () => openContratoModal(b.dataset.editarContrato));
+  qsa('[data-del-contrato]').forEach(b => b.onclick = () => {
+    if (confirm('Excluir este contrato do histórico?')) {
+      saveContratos(getContratos().filter(c => c.id !== b.dataset.delContrato));
+      renderContratos();
+    }
+  });
+}
+
+function openContratoModal(editingId) {
+  const clients = getClients();
+  const mensalidades = getMensalidades();
+  const orcamentosFechados = getOrcamentos().filter(o => o.status === 'fechado');
+  const editing = editingId ? getContratos().find(c => c.id === editingId) : null;
+
+  openModal(`
+    <div class="modal-title">${editing ? 'Editar contrato' : 'Gerar contrato'}</div>
+    <p class="view-desc" style="margin:-10px 0 16px;">Preenche o que já se sabe. O resto das cláusulas (prazos, percentuais, cronograma, valores detalhados por item) vem marcado como <strong>${MARCADOR_PENDENTE}</strong> no arquivo, pra você completar direto no Word.</p>
+    <form id="contratoForm">
+      <div class="field">
+        <label class="field-label">Preencher com cliente já cadastrado (opcional)</label>
+        <select class="input" id="ctClienteExistente">
+          <option value="">— digitar manualmente —</option>
+          ${clients.map(c => `<option value="${c.id}" ${editing && editing._clientId === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Tipo</label>
+          <select class="input" id="ctTipo">
+            <option value="pf" ${!editing || editing._tipo !== 'pj' ? 'selected' : ''}>Pessoa física</option>
+            <option value="pj" ${editing && editing._tipo === 'pj' ? 'selected' : ''}>Pessoa jurídica</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label">Nome / Razão social</label>
+          <input class="input" id="ctNome" required value="${editing ? escapeHtml(editing.contratante_nome || '') : ''}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">CPF/CNPJ</label>
+          <input class="input" id="ctDoc" value="${editing ? escapeHtml(editing.contratante_doc || '') : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">Representante legal (se PJ)</label>
+          <input class="input" id="ctRepresentante" value="${editing ? escapeHtml(editing.contratante_representante || '') : ''}">
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Endereço</label>
+        <input class="input" id="ctEndereco" value="${editing ? escapeHtml(editing.contratante_endereco || '') : ''}">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Cidade/UF</label>
+          <input class="input" id="ctCidadeUf" value="${editing ? escapeHtml(editing.contratante_cidade_uf || '') : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">CEP</label>
+          <input class="input" id="ctCep" value="${editing ? escapeHtml(editing.contratante_cep || '') : ''}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">E-mail</label>
+          <input class="input" type="email" id="ctEmail" value="${editing ? escapeHtml(editing.contratante_email || '') : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">Telefone/WhatsApp</label>
+          <input class="input" id="ctTelefone" value="${editing ? escapeHtml(editing.contratante_telefone || '') : ''}">
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field-label">Plano de mensalidade contratado (opcional)</label>
+        <select class="input" id="ctPlano">
+          <option value="">— nenhum / a combinar —</option>
+          ${mensalidades.map(p => `<option value="${p.id}" ${editing && editing._planoId === p.id ? 'selected' : ''}>${p.nome} — ${formatCurrency(p.valor)}/mês</option>`).join('')}
+        </select>
+      </div>
+
+      ${orcamentosFechados.length > 0 ? `
+      <div class="field">
+        <label class="field-label">Puxar valor de um orçamento fechado (opcional)</label>
+        <select class="input" id="ctOrcamento">
+          <option value="">— nenhum —</option>
+          ${orcamentosFechados.map(o => `<option value="${o.id}" ${editing && editing._orcamentoId === o.id ? 'selected' : ''}>${escapeHtml(o.nomeContato)} — ${escapeHtml(o.resumo)}</option>`).join('')}
+        </select>
+      </div>
+      ` : ''}
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnCancelContrato">Cancelar</button>
+        <button type="submit" class="btn btn-primary">${editing ? 'Salvar e baixar Word' : 'Gerar contrato (Word)'}</button>
+      </div>
+    </form>
+  `);
+
+  qs('#ctClienteExistente').onchange = () => {
+    const c = clientById(qs('#ctClienteExistente').value);
+    if (!c) return;
+    qs('#ctTipo').value = c.tipo === 'pj' ? 'pj' : 'pf';
+    qs('#ctNome').value = c.nome || '';
+    qs('#ctDoc').value = formatDocumento(c.documento || '') || '';
+    qs('#ctEndereco').value = c.endereco || '';
+    qs('#ctCidadeUf').value = c.cidade || '';
+    qs('#ctEmail').value = c.email || '';
+    qs('#ctTelefone').value = c.telefone || '';
+  };
+
+  qs('#btnCancelContrato').onclick = closeModal;
+  qs('#contratoForm').onsubmit = (e) => {
+    e.preventDefault();
+    const nome = qs('#ctNome').value.trim();
+    if (!nome) { alert('Digite o nome do contratante.'); return; }
+
+    const planoId = qs('#ctPlano').value;
+    const plano = planoId ? planoById(planoId) : null;
+    const orcamentoSel = qs('#ctOrcamento');
+    const orcamentoId = orcamentoSel ? orcamentoSel.value : '';
+    const orcamento = orcamentoId ? getOrcamentos().find(o => o.id === orcamentoId) : null;
+
+    const dados = {
+      _clientId: qs('#ctClienteExistente').value || null,
+      _tipo: qs('#ctTipo').value,
+      _planoId: planoId || null,
+      _orcamentoId: orcamentoId || null,
+      contratante_nome: nome,
+      contratante_doc: qs('#ctDoc').value.trim(),
+      contratante_representante: qs('#ctRepresentante').value.trim(),
+      contratante_endereco: qs('#ctEndereco').value.trim(),
+      contratante_cidade_uf: qs('#ctCidadeUf').value.trim(),
+      contratante_cep: qs('#ctCep').value.trim(),
+      contratante_email: qs('#ctEmail').value.trim(),
+      contratante_telefone: qs('#ctTelefone').value.trim(),
+      planoNome: plano ? plano.nome : '',
+      valor_mensalidade_base: plano ? String(plano.valor).replace('.', ',') : '',
+      valor_total: orcamento && orcamento.totalUnico > 0 ? String(orcamento.totalUnico).replace('.', ',') : '',
+      valor_dev_principal: orcamento && orcamento.totalUnico > 0 ? String(orcamento.totalUnico).replace('.', ',') : '',
+      criadoEm: editing ? editing.criadoEm : todayISO()
+    };
+
+    const lista = getContratos();
+    let registro;
+    if (editing) {
+      const idx = lista.findIndex(c => c.id === editing.id);
+      registro = { ...editing, ...dados };
+      lista[idx] = registro;
+    } else {
+      registro = { id: uid(), ...dados };
+      lista.push(registro);
+    }
+    saveContratos(lista);
+    closeModal();
+    renderContratos();
+    gerarContratoDocx(registro);
+  };
+}
+
+async function gerarContratoDocx(registro) {
+  if (!registro) return;
+  try {
+    const resp = await fetch('assets/contrato-template.docx');
+    if (!resp.ok) throw new Error('modelo não encontrado');
+    const buf = await resp.arrayBuffer();
+    const zip = new PizZip(buf);
+    const dados = { ...getContratadoInfo(), ...registro };
+    const doc = new window.docxtemplater(zip, {
+      paragraphLoop: true,
+      linebreaks: true,
+      nullGetter: () => MARCADOR_PENDENTE
+    });
+    doc.render(dados);
+    const out = doc.getZip().generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    const url = URL.createObjectURL(out);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `contrato-${(registro.contratante_nome || 'cliente').replace(/\s+/g, '-').toLowerCase()}.docx`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error(err);
+    alert('Não consegui gerar o Word agora. O modelo precisa estar na pasta "assets" do seu repositório (assets/contrato-template.docx). Confira e tente de novo.');
+  }
+}
+
+async function gerarContratoPDF(registro) {
+  if (!registro) return;
+  try {
+    const resp = await fetch('assets/contrato-template.html');
+    if (!resp.ok) throw new Error('modelo não encontrado');
+    let html = await resp.text();
+    const dados = { ...getContratadoInfo(), ...registro };
+    html = html.replace(/\{([a-z_0-9]+)\}/g, (m, key) => {
+      const v = dados[key];
+      return escapeHtml(v && String(v).trim() ? v : MARCADOR_PENDENTE);
+    });
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    container.style.cssText = 'position:fixed; left:-9999px; top:0; width:720px; padding:20px; font-family:Georgia,serif; font-size:12.5px; line-height:1.5; background:#fff; color:#111;';
+    document.body.appendChild(container);
+    await html2pdf().from(container).set({
+      margin: 15,
+      filename: `contrato-${(registro.contratante_nome || 'cliente').replace(/\s+/g, '-').toLowerCase()}.pdf`,
+      html2canvas: { scale: 2 },
+      jsPDF: { unit: 'mm', format: 'a4' },
+      pagebreak: { mode: ['css', 'legacy'] }
+    }).save();
+    document.body.removeChild(container);
+  } catch (err) {
+    console.error(err);
+    alert('Não consegui gerar o PDF agora. O modelo precisa estar na pasta "assets" do seu repositório (assets/contrato-template.html). Tente de novo ou use o Word.');
+  }
+}
+
 // ---------- CONFIGURAÇÕES ----------
 function renderConfig() {
   const s = getSettings();
@@ -2111,6 +2679,50 @@ function renderConfig() {
       <button type="submit" class="btn btn-primary">Salvar</button>
     </form>
 
+    <div class="section-title">Seus dados no contrato</div>
+    <p class="view-desc" style="margin-bottom:14px;">Usados como CONTRATADO ao gerar contratos. Já vêm com os dados do seu modelo — mude só se algo tiver mudado.</p>
+    <form id="contratadoForm" style="max-width:420px; margin-bottom:32px;">
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Nome</label>
+          <input class="input" id="cdNome" value="${escapeHtml((s.contratado && s.contratado.contratado_nome) || CONTRATADO_PADRAO.contratado_nome)}">
+        </div>
+        <div class="field">
+          <label class="field-label">CPF</label>
+          <input class="input" id="cdCpf" value="${escapeHtml((s.contratado && s.contratado.contratado_cpf) || CONTRATADO_PADRAO.contratado_cpf)}">
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Profissão</label>
+        <input class="input" id="cdProfissao" value="${escapeHtml((s.contratado && s.contratado.contratado_profissao) || CONTRATADO_PADRAO.contratado_profissao)}">
+      </div>
+      <div class="field">
+        <label class="field-label">Endereço</label>
+        <input class="input" id="cdEndereco" value="${escapeHtml((s.contratado && s.contratado.contratado_endereco) || CONTRATADO_PADRAO.contratado_endereco)}">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Cidade/UF</label>
+          <input class="input" id="cdCidadeUf" value="${escapeHtml((s.contratado && s.contratado.contratado_cidade_uf) || CONTRATADO_PADRAO.contratado_cidade_uf)}">
+        </div>
+        <div class="field">
+          <label class="field-label">CEP</label>
+          <input class="input" id="cdCep" value="${escapeHtml((s.contratado && s.contratado.contratado_cep) || CONTRATADO_PADRAO.contratado_cep)}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">E-mail</label>
+          <input class="input" id="cdEmail" value="${escapeHtml((s.contratado && s.contratado.contratado_email) || CONTRATADO_PADRAO.contratado_email)}">
+        </div>
+        <div class="field">
+          <label class="field-label">Telefone/WhatsApp</label>
+          <input class="input" id="cdTelefone" value="${escapeHtml((s.contratado && s.contratado.contratado_telefone) || CONTRATADO_PADRAO.contratado_telefone)}">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary">Salvar</button>
+    </form>
+
     <div class="section-title">Backup dos dados</div>
     <p class="view-desc" style="margin-bottom:14px; max-width:520px;">
       Seus dados já ficam salvos na nuvem (Firebase), então não somem se você trocar
@@ -2133,12 +2745,31 @@ function renderConfig() {
   qs('#settingsForm').onsubmit = (e) => {
     e.preventDefault();
     saveSettings({
+      ...getSettings(),
       seuNome: qs('#sSeuNome').value.trim(),
       empresaNome: qs('#sEmpresa').value.trim(),
       pix: qs('#sPix').value.trim(),
       valorDescontoIndicacao: qs('#sDescontoIndicacao').value === '' ? null : Number(qs('#sDescontoIndicacao').value)
     });
     refreshBrandBar();
+    alert('Salvo.');
+  };
+
+  qs('#contratadoForm').onsubmit = (e) => {
+    e.preventDefault();
+    saveSettings({
+      ...getSettings(),
+      contratado: {
+        contratado_nome: qs('#cdNome').value.trim(),
+        contratado_cpf: qs('#cdCpf').value.trim(),
+        contratado_profissao: qs('#cdProfissao').value.trim(),
+        contratado_endereco: qs('#cdEndereco').value.trim(),
+        contratado_cidade_uf: qs('#cdCidadeUf').value.trim(),
+        contratado_cep: qs('#cdCep').value.trim(),
+        contratado_email: qs('#cdEmail').value.trim(),
+        contratado_telefone: qs('#cdTelefone').value.trim()
+      }
+    });
     alert('Salvo.');
   };
 
@@ -2200,7 +2831,23 @@ function emptyState(title, sub) {
 }
 
 // ---------- BOOT ----------
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme === 'escuro' ? 'escuro' : 'claro');
+  const btn = qs('#themeToggle');
+  if (btn) btn.textContent = theme === 'escuro' ? '☀️' : '🌙';
+}
+function toggleTheme() {
+  const atual = document.documentElement.getAttribute('data-theme') === 'escuro' ? 'escuro' : 'claro';
+  const novo = atual === 'escuro' ? 'claro' : 'escuro';
+  localStorage.setItem('ca_tema', novo);
+  applyTheme(novo);
+  if (_docRef) saveSettings({ ...getSettings(), tema: novo });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  applyTheme(localStorage.getItem('ca_tema') || 'claro');
+  qs('#themeToggle').addEventListener('click', toggleTheme);
+
   const sidebarMenu = qs('#sidebarMenu');
   const navToggle = qs('#navToggle');
 

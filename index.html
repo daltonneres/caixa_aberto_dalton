@@ -41,6 +41,7 @@
             <div class="brand-sub" id="brandEmpresa">seu financeiro</div>
           </div>
         </div>
+        <button class="theme-toggle" id="themeToggle" aria-label="Alternar tema" title="Alternar modo claro/escuro">🌙</button>
         <button class="nav-toggle" id="navToggle" aria-label="Abrir menu">
           <span class="nav-toggle-icon"></span>
         </button>
@@ -53,6 +54,8 @@
           <button class="nav-btn" data-view="agenda">Agenda</button>
           <button class="nav-btn" data-view="servicos">Serviços</button>
           <button class="nav-btn" data-view="mensalidades">Mensalidades</button>
+          <button class="nav-btn" data-view="contratos">Contratos</button>
+          <button class="nav-btn" data-view="relatorios">Relatórios</button>
           <button class="nav-btn" data-view="config">Configurações</button>
         </nav>
         <button class="btn-logout" id="btnLogout">Sair</button>
@@ -62,6 +65,16 @@
   </div>
 
   <div id="modalRoot"></div>
+
+  <!-- pdf-lib (geração de recibos em PDF direto no navegador) -->
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+
+  <!-- PizZip + docxtemplater (preenchimento do modelo de contrato .docx) -->
+  <script src="https://unpkg.com/pizzip@3.1.6/dist/pizzip.min.js"></script>
+  <script src="https://unpkg.com/docxtemplater@3.44.0/js/docxtemplater.js"></script>
+
+  <!-- html2pdf.js (exportar o contrato preenchido também em PDF) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 
   <!-- Firebase (compat SDK — mais simples de usar sem processo de build) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>

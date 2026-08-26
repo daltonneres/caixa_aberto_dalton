@@ -16,13 +16,44 @@
   --font-mono:'IBM Plex Mono', monospace;
 }
 
+[data-theme="escuro"]{
+  --paper:#171F1B;
+  --paper-alt:#1E2822;
+  --card:#212B24;
+  --ink:#EAEFE9;
+  --ink-soft:#9AACA1;
+  --line:#33403A;
+  --emerald:#3FBE82;
+  --emerald-bg:#153323;
+  --amber:#E0A83F;
+  --amber-bg:#3A2E14;
+  --brick:#E37B62;
+  --brick-bg:#3C201A;
+}
+[data-theme="escuro"] .sidebar{background:#0E1512;}
+[data-theme="escuro"] .lock-screen{background: radial-gradient(ellipse at top left, rgba(63,190,130,0.08), transparent 55%), #0E1512;}
+[data-theme="escuro"] .btn-primary{background:var(--emerald); color:#0E1512;}
+[data-theme="escuro"] .nav-btn.active{color:#0E1512;}
+
 *{box-sizing:border-box; margin:0; padding:0;}
 body{
   font-family:var(--font-body);
   background:var(--paper);
   color:var(--ink);
   min-height:100vh;
+  transition:background .2s, color .2s;
 }
+.theme-toggle{
+  background:transparent;
+  border:1.5px solid rgba(255,255,255,0.18);
+  color:#C7D3CB;
+  width:34px; height:34px;
+  border-radius:6px;
+  font-size:15px;
+  flex-shrink:0;
+  display:flex; align-items:center; justify-content:center;
+}
+.theme-toggle:hover{border-color:#fff; color:#fff;}
 .hidden{display:none !important;}
 button{font-family:inherit; cursor:pointer;}
 input, textarea, select{font-family:inherit;}
@@ -297,6 +328,8 @@ label.field-label{
 .today-item a{color:#fff; text-decoration:underline; text-underline-offset:2px;}
 .birthday-banner{background:var(--brick);}
 .birthday-banner .today-item::before{color:#E8B7A9;}
+.contract-banner{background:var(--emerald);}
+.contract-banner .today-item::before{color:#BFE3CE;}
 
 .countdown-banner{
   display:flex;
@@ -536,6 +569,55 @@ label.field-label{
 .orcamento-status-select.stamp-pendente{color:var(--amber); border-color:var(--amber); background:var(--amber-bg);}
 .orcamento-status-select.stamp-atrasado{color:var(--brick); border-color:var(--brick); background:var(--brick-bg);}
 .orcamento-status-select.stamp-pausado{color:var(--ink-soft); border-color:var(--line); background:var(--paper-alt);}
+
+/* ---------- follow-up de orçamento ---------- */
+.followup-banner{
+  background:var(--amber-bg);
+  border:1.5px solid var(--amber);
+  border-radius:6px;
+  padding:12px 16px;
+  margin-bottom:16px;
+  font-size:13px;
+  color:var(--ink);
+}
+.followup-banner strong{display:block; margin-bottom:8px;}
+.followup-banner .today-item{display:inline-flex; align-items:center; margin:2px 8px 2px 0;}
+.followup-banner .today-item::before{content:none;}
+
+/* ---------- funil kanban de orçamentos ---------- */
+.kanban-board{
+  display:flex;
+  gap:14px;
+  overflow-x:auto;
+  padding-bottom:8px;
+}
+.kanban-column{
+  background:var(--paper-alt);
+  border-radius:8px;
+  padding:12px;
+  min-width:220px;
+  max-width:220px;
+  flex-shrink:0;
+}
+.kanban-column-header{
+  font-size:11.5px;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:0.4px;
+  padding:6px 8px;
+  border-radius:4px;
+  margin-bottom:10px;
+  display:flex;
+  justify-content:space-between;
+}
+.kanban-card{
+  background:var(--card);
+  border:1px solid var(--line);
+  border-radius:6px;
+  padding:10px;
+  margin-bottom:10px;
+}
+.kanban-card .ledger-actions{gap:4px; flex-wrap:wrap;}
 
 /* focus visibility */
 button:focus-visible, .nav-btn:focus-visible, input:focus-visible{
