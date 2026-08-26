@@ -2585,8 +2585,10 @@ function openContratoModal(editingId) {
 async function gerarContratoDocx(registro) {
   if (!registro) return;
   try {
+    if (typeof PizZip === 'undefined') throw new Error('A biblioteca PizZip não carregou. Confira sua internet ou se algum bloqueador de anúncios/rastreadores está travando o unpkg.com.');
+    if (typeof window.docxtemplater === 'undefined') throw new Error('A biblioteca docxtemplater não carregou. Confira sua internet ou se algum bloqueador de anúncios/rastreadores está travando o unpkg.com.');
     const resp = await fetch('assets/contrato-template.docx');
-    if (!resp.ok) throw new Error('modelo não encontrado');
+    if (!resp.ok) throw new Error(`Não achei o arquivo assets/contrato-template.docx (status ${resp.status}). Confira se ele está na pasta certa.`);
     const buf = await resp.arrayBuffer();
     const zip = new PizZip(buf);
     const dados = { ...getContratadoInfo(), ...registro };
@@ -2605,36 +2607,41 @@ async function gerarContratoDocx(registro) {
     URL.revokeObjectURL(url);
   } catch (err) {
     console.error(err);
-    alert('Não consegui gerar o Word agora. O modelo precisa estar na pasta "assets" do seu repositório (assets/contrato-template.docx). Confira e tente de novo.');
+    alert('Não consegui gerar o Word agora.\n\nErro técnico (me manda essa mensagem): ' + (err && err.message ? err.message : err));
   }
 }
 
 async function gerarContratoPDF(registro) {
   if (!registro) return;
   try {
+    if (typeof html2pdf === 'undefined') throw new Error('A biblioteca html2pdf.js não carregou. Confira sua internet ou se algum bloqueador de anúncios/rastreadores está travando o cdnjs.cloudflare.com.');
     const resp = await fetch('assets/contrato-template.html');
-    if (!resp.ok) throw new Error('modelo não encontrado');
+    if (!resp.ok) throw new Error(`Não achei o arquivo assets/contrato-template.html (status ${resp.status}). Confira se ele está na pasta certa.`);
     let html = await resp.text();
     const dados = { ...getContratadoInfo(), ...registro };
     html = html.replace(/\{([a-z_0-9]+)\}/g, (m, key) => {
       const v = dados[key];
       return escapeHtml(v && String(v).trim() ? v : MARCADOR_PENDENTE);
     });
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'height:0; overflow:hidden;';
     const container = document.createElement('div');
     container.innerHTML = html;
-    container.style.cssText = 'position:fixed; left:-9999px; top:0; width:720px; padding:20px; font-family:Georgia,serif; font-size:12.5px; line-height:1.5; background:#fff; color:#111;';
-    document.body.appendChild(container);
+    container.style.cssText = 'width:720px; padding:20px; font-family:Georgia,serif; font-size:12.5px; line-height:1.5; background:#fff; color:#111;';
+    wrapper.appendChild(container);
+    document.body.appendChild(wrapper);
+    await new Promise(r => setTimeout(r, 50)); // dá tempo do navegador desenhar o conteúdo antes de capturar
     await html2pdf().from(container).set({
       margin: 15,
       filename: `contrato-${(registro.contratante_nome || 'cliente').replace(/\s+/g, '-').toLowerCase()}.pdf`,
-      html2canvas: { scale: 2 },
+      html2canvas: { scale: 2, useCORS: true },
       jsPDF: { unit: 'mm', format: 'a4' },
       pagebreak: { mode: ['css', 'legacy'] }
     }).save();
-    document.body.removeChild(container);
+    document.body.removeChild(wrapper);
   } catch (err) {
     console.error(err);
-    alert('Não consegui gerar o PDF agora. O modelo precisa estar na pasta "assets" do seu repositório (assets/contrato-template.html). Tente de novo ou use o Word.');
+    alert('Não consegui gerar o PDF agora.\n\nErro técnico (me manda essa mensagem): ' + (err && err.message ? err.message : err));
   }
 }
 
