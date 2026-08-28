@@ -233,10 +233,13 @@ let _servicos = [];
 let _orcamentos = [];
 let _contratos = [];
 let _mensalidades = [];
+let _colaboradores = [];
 let _settings = {};
 let _docRef = null;
 let _unsubscribeSnapshot = null;
 let _saveTimer = null;
+let _meuUid = null;
+let _syncTargetUid = null;
 
 function getClients() { return _clients; }
 function getCharges() { return _charges; }
@@ -245,6 +248,7 @@ function getServicos() { return _servicos; }
 function getOrcamentos() { return _orcamentos; }
 function getContratos() { return _contratos; }
 function getMensalidades() { return _mensalidades; }
+function getColaboradores() { return _colaboradores; }
 function getSettings() { return _settings; }
 
 function saveClients(list) { _clients = list; queuePersist(); }
@@ -254,6 +258,7 @@ function saveServicos(list) { _servicos = list; queuePersist(); }
 function saveOrcamentos(list) { _orcamentos = list; queuePersist(); }
 function saveContratos(list) { _contratos = list; queuePersist(); }
 function saveMensalidades(list) { _mensalidades = list; queuePersist(); }
+function saveColaboradores(list) { _colaboradores = list; queuePersist(); }
 function saveSettings(s) { _settings = s; queuePersist(); }
 
 function clientById(id) { return getClients().find(c => c.id === id); }
@@ -278,6 +283,7 @@ function queuePersist() {
       orcamentos: _orcamentos,
       contratos: _contratos,
       mensalidades: _mensalidades,
+      colaboradores: _colaboradores,
       settings: _settings,
       updatedAt: new Date().toISOString()
     }, { merge: true }).catch(err => {
@@ -306,8 +312,9 @@ function showSyncError() {
 let currentDetailClientId = null;
 let _orcamentoView = 'lista';
 
-function startFirestoreSync(uid) {
-  _docRef = db.collection('users').doc(uid).collection('app').doc('data');
+function startFirestoreSync(donoUid) {
+  _syncTargetUid = donoUid;
+  _docRef = db.collection('users').doc(donoUid).collection('app').doc('data');
   _unsubscribeSnapshot = _docRef.onSnapshot(snap => {
     const data = snap.data() || {};
     _clients = data.clients || [];
@@ -317,6 +324,7 @@ function startFirestoreSync(uid) {
     _orcamentos = data.orcamentos || [];
     _contratos = data.contratos || [];
     _mensalidades = data.mensalidades || [];
+    _colaboradores = data.colaboradores || [];
     _settings = data.settings || {};
     if (_settings.tema) {
       localStorage.setItem('ca_tema', _settings.tema);
@@ -330,15 +338,61 @@ function startFirestoreSync(uid) {
     }
   }, err => {
     console.error('Erro ao sincronizar com o Firebase:', err);
-    showSyncError();
+    if (err.code === 'permission-denied') {
+      alert('Você não tem mais permissão de acesso a esses dados (talvez o vínculo tenha sido removido). Vamos te mostrar seus próprios dados.');
+      desvincularConta(true);
+    } else {
+      showSyncError();
+    }
   });
+}
+
+// Descobre se este usuário é "dono" dos próprios dados ou está vinculado
+// como colaborador(a) de outra conta, e retorna o UID de quem sincronizar.
+async function resolveSyncTarget(meuUid) {
+  try {
+    const linkDoc = await db.collection('users').doc(meuUid).collection('link').doc('dono').get();
+    if (linkDoc.exists && linkDoc.data().donoUid) {
+      return linkDoc.data().donoUid;
+    }
+  } catch (err) {
+    console.error('Erro ao verificar vínculo:', err);
+  }
+  return meuUid;
+}
+
+async function vincularConta(donoUid) {
+  donoUid = donoUid.trim();
+  if (!donoUid) { alert('Cole o UID da conta que você quer acompanhar.'); return; }
+  if (donoUid === _meuUid) { alert('Esse é o seu próprio UID — não precisa vincular.'); return; }
+  try {
+    await db.collection('users').doc(_meuUid).collection('link').doc('dono').set({ donoUid });
+    stopFirestoreSync();
+    startFirestoreSync(donoUid);
+    alert('Vinculado! Se os dados não aparecerem, confira se o dono já te adicionou como colaborador(a) nas Configurações dele.');
+    navigate('config');
+  } catch (err) {
+    console.error(err);
+    alert('Não consegui vincular agora: ' + err.message);
+  }
+}
+
+async function desvincularConta(silencioso) {
+  try {
+    await db.collection('users').doc(_meuUid).collection('link').doc('dono').delete();
+  } catch (err) {
+    console.error(err);
+  }
+  stopFirestoreSync();
+  startFirestoreSync(_meuUid);
+  if (!silencioso) navigate('config');
 }
 
 function stopFirestoreSync() {
   if (_unsubscribeSnapshot) _unsubscribeSnapshot();
   _unsubscribeSnapshot = null;
   _docRef = null;
-  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _settings = {};
+  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _settings = {};
 }
 
 // ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
@@ -2901,10 +2955,70 @@ function renderConfig() {
     </div>
 
     <div class="section-title">Sua conta</div>
-    <p class="view-desc" style="margin-bottom:24px;">
+    <p class="view-desc" style="margin-bottom:10px;">
       Logado como <strong>${escapeHtml(auth.currentUser ? auth.currentUser.email : '')}</strong>.
       Use este e-mail e senha pra entrar em outros aparelhos.
     </p>
+    <div class="field-row" style="align-items:flex-end; max-width:520px; margin-bottom:8px;">
+      <div class="field" style="margin-bottom:0;">
+        <label class="field-label">Seu ID de usuário (UID)</label>
+        <input class="input" id="meuUidCampo" readonly value="${escapeHtml(_meuUid || '')}">
+      </div>
+      <button class="btn btn-ghost" id="btnCopiarUid" style="margin-bottom:0;">Copiar</button>
+    </div>
+
+    ${_syncTargetUid && _meuUid && _syncTargetUid !== _meuUid ? `
+      <div class="colab-banner">
+        🔗 Você está vendo os dados de outra conta (vinculado). Se algo parecer errado ou você não deveria mais ter esse acesso, clique em desvincular.
+        <button class="btn btn-ghost btn-sm" id="btnDesvincular" style="margin-top:8px;">Desvincular e ver meus próprios dados</button>
+      </div>
+    ` : `
+      <div class="section-title" style="font-size:15px; margin-top:20px;">Colaboradores</div>
+      <p class="view-desc" style="margin-bottom:12px;">
+        Pessoas com login próprio que acessam os mesmos dados que você. Peça pra
+        pessoa criar a conta dela normalmente, copiar o "ID de usuário (UID)" dela
+        aqui em Configurações, e te mandar esse código.
+      </p>
+      <div class="field-row" style="max-width:520px;">
+        <div class="field">
+          <label class="field-label">UID da pessoa</label>
+          <input class="input" id="colabUidNovo" placeholder="Cole o UID que ela te mandou">
+        </div>
+        <div class="field">
+          <label class="field-label">Apelido (opcional)</label>
+          <input class="input" id="colabApelidoNovo" placeholder="Ex: Ana">
+        </div>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="btnAddColaborador" style="margin-bottom:16px;">+ Adicionar colaborador(a)</button>
+      ${getColaboradores().length > 0 ? `
+        <div class="ledger" style="max-width:520px; margin-bottom:16px;">
+          ${getColaboradores().map(c => `
+            <div class="ledger-row">
+              <div class="ledger-main">
+                <div class="ledger-title">${escapeHtml(c.apelido || 'Sem apelido')}</div>
+                <div class="ledger-sub">${escapeHtml(c.uid)}</div>
+              </div>
+              <button class="btn btn-danger btn-sm" data-del-colaborador="${escapeHtml(c.uid)}">Remover</button>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+    `}
+
+    <div class="section-title" style="font-size:15px; margin-top:20px;">Vincular-se a outra conta</div>
+    <p class="view-desc" style="margin-bottom:12px;">
+      Se você é colaborador(a) de outra pessoa, cole aqui o UID <strong>dela</strong>
+      (ela encontra o dela nesta mesma tela). Depois disso, você passa a ver os
+      dados dela — mas ela também precisa ter te adicionado como colaborador(a)
+      acima, senão o acesso é negado.
+    </p>
+    <div class="field-row" style="max-width:520px;">
+      <div class="field">
+        <label class="field-label">UID do dono da conta</label>
+        <input class="input" id="donoUidCampo" placeholder="Cole aqui">
+      </div>
+    </div>
+    <button class="btn btn-ghost btn-sm" id="btnVincular" style="margin-bottom:32px;">Vincular</button>
 
     <div class="section-title">Seus dados</div>
     <form id="settingsForm" style="max-width:420px; margin-bottom:32px;">
@@ -2989,6 +3103,37 @@ function renderConfig() {
     <p class="view-desc" style="margin-bottom:14px;">Isso apaga tudo (${clients.length} clientes, ${charges.length} cobranças, ${getMeetings().length} reuniões) permanentemente da sua conta.</p>
     <button class="btn btn-danger" id="btnWipe">Apagar todos os dados</button>
   `;
+
+  const btnCopiarUid = qs('#btnCopiarUid');
+  if (btnCopiarUid) btnCopiarUid.onclick = () => {
+    qs('#meuUidCampo').select();
+    navigator.clipboard.writeText(_meuUid || '').then(() => {
+      btnCopiarUid.textContent = 'Copiado!';
+      setTimeout(() => { btnCopiarUid.textContent = 'Copiar'; }, 1500);
+    }).catch(() => alert('Não consegui copiar sozinho — seleciona o texto e copia manualmente (Ctrl+C).'));
+  };
+
+  const btnAddColaborador = qs('#btnAddColaborador');
+  if (btnAddColaborador) btnAddColaborador.onclick = () => {
+    const uid = qs('#colabUidNovo').value.trim();
+    if (!uid) { alert('Cole o UID da pessoa.'); return; }
+    if (uid === _meuUid) { alert('Esse é o seu próprio UID.'); return; }
+    if (getColaboradores().some(c => c.uid === uid)) { alert('Esse UID já está na lista.'); return; }
+    const apelido = qs('#colabApelidoNovo').value.trim();
+    saveColaboradores([...getColaboradores(), { uid, apelido }]);
+    renderConfig();
+  };
+  qsa('[data-del-colaborador]').forEach(b => b.onclick = () => {
+    if (confirm('Remover o acesso dessa pessoa aos seus dados?')) {
+      saveColaboradores(getColaboradores().filter(c => c.uid !== b.dataset.delColaborador));
+      renderConfig();
+    }
+  });
+
+  const btnVincular = qs('#btnVincular');
+  if (btnVincular) btnVincular.onclick = () => vincularConta(qs('#donoUidCampo').value);
+  const btnDesvincular = qs('#btnDesvincular');
+  if (btnDesvincular) btnDesvincular.onclick = () => desvincularConta();
 
   qs('#settingsForm').onsubmit = (e) => {
     e.preventDefault();
@@ -3116,11 +3261,14 @@ document.addEventListener('DOMContentLoaded', () => {
     auth.signOut();
   });
 
-  auth.onAuthStateChanged(user => {
+  auth.onAuthStateChanged(async (user) => {
     if (user) {
-      startFirestoreSync(user.uid);
+      _meuUid = user.uid;
+      const donoUid = await resolveSyncTarget(user.uid);
+      startFirestoreSync(donoUid);
       enterApp();
     } else {
+      _meuUid = null;
       stopFirestoreSync();
       showLockScreen();
     }

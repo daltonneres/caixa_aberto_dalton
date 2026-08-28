@@ -152,6 +152,17 @@ input, textarea, select{font-family:inherit;}
 }
 .sync-banner.show{bottom:24px;}
 
+.colab-banner{
+  background:var(--amber-bg);
+  border:1.5px solid var(--amber);
+  border-radius:6px;
+  padding:14px 16px;
+  margin:16px 0 24px;
+  font-size:13px;
+  max-width:520px;
+  color:var(--ink);
+}
+
 /* ---------- INPUTS / BUTTONS ---------- */
 .input, textarea.input, select.input{
   width:100%;
