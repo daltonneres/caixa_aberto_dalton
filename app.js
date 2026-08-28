@@ -176,6 +176,51 @@ function formatDocumento(digits) {
   if (digits.length === 14) return digits.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5');
   return digits;
 }
+function formatTelefoneBR(value) {
+  const digits = onlyDigits(value).replace(/^55(?=\d{10,11}$)/, '');
+  if (digits.length <= 2) return digits ? `(${digits}` : '';
+  if (digits.length <= 6) return `(${digits.slice(0, 2)}) ${digits.slice(2)}`;
+  if (digits.length <= 10) return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
+  return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7, 11)}`;
+}
+function validarCpf(digits) {
+  if (!/^\d{11}$/.test(digits) || /^(\d)\1{10}$/.test(digits)) return false;
+  const calc = limite => {
+    let soma = 0;
+    for (let i = 0; i < limite - 1; i++) soma += Number(digits[i]) * (limite - i);
+    const resto = (soma * 10) % 11;
+    return resto === 10 ? 0 : resto;
+  };
+  return calc(10) === Number(digits[9]) && calc(11) === Number(digits[10]);
+}
+function validarCnpj(digits) {
+  if (!/^\d{14}$/.test(digits) || /^(\d)\1{13}$/.test(digits)) return false;
+  const calc = posicao => {
+    const pesos = posicao === 12 ? [5,4,3,2,9,8,7,6,5,4,3,2] : [6,5,4,3,2,9,8,7,6,5,4,3,2];
+    const soma = pesos.reduce((total, peso, i) => total + Number(digits[i]) * peso, 0);
+    return soma % 11 < 2 ? 0 : 11 - (soma % 11);
+  };
+  return calc(12) === Number(digits[12]) && calc(13) === Number(digits[13]);
+}
+function documentoValido(digits, tipo) {
+  return tipo === 'pj' ? validarCnpj(digits) : validarCpf(digits);
+}
+function dataPorExtenso(iso) {
+  if (!iso) return '';
+  const [ano, mes, dia] = iso.split('-').map(Number);
+  return new Intl.DateTimeFormat('pt-BR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })
+    .format(new Date(Date.UTC(ano, mes - 1, dia)));
+}
+function somarDias(iso, dias) {
+  if (!iso || !Number.isFinite(dias)) return '';
+  const [ano, mes, dia] = iso.split('-').map(Number);
+  const data = new Date(Date.UTC(ano, mes - 1, dia + dias));
+  return data.toISOString().slice(0, 10);
+}
+function distribuirCronograma(inicio, totalDias) {
+  if (!inicio || !Number.isFinite(totalDias) || totalDias < 0) return Array(8).fill('');
+  return Array.from({ length: 8 }, (_, i) => formatDateBR(somarDias(inicio, Math.round(totalDias * i / 7))));
+}
 
 // ---------- CACHE LOCAL + SINCRONIZAÇÃO COM O FIRESTORE ----------
 // Ideia: o resto do app continua chamando getClients()/saveClients() etc.
@@ -726,6 +771,17 @@ function openClientModal(id, onSaved) {
   `);
   qs('#btnCancelClient').onclick = closeModal;
 
+  qs('#cTelefone').addEventListener('input', e => { e.target.value = formatTelefoneBR(e.target.value); });
+  qs('#cEmergenciaTelefone').addEventListener('input', e => { e.target.value = formatTelefoneBR(e.target.value); });
+  qs('#cDocumento').addEventListener('input', e => { e.target.value = formatDocumento(onlyDigits(e.target.value).slice(0, 14)); });
+  qs('#cTipo').onchange = () => {
+    const tipo = qs('#cTipo').value;
+    const doc = qs('#cDocumento');
+    doc.placeholder = tipo === 'pj' ? '00.000.000/0000-00' : '000.000.000-00';
+    doc.value = formatDocumento(onlyDigits(doc.value).slice(0, tipo === 'pj' ? 14 : 11));
+  };
+  qs('#cTipo').dispatchEvent(new Event('change'));
+
   qs('#cPlanoId').onchange = () => {
     const id = qs('#cPlanoId').value;
     qs('#cPlanoPersonalizadoRow').style.display = id === 'personalizado' ? '' : 'none';
@@ -742,8 +798,8 @@ function openClientModal(id, onSaved) {
     }
 
     const telefoneDigits = onlyDigits(qs('#cTelefone').value);
-    if (telefoneDigits.length < 10 || telefoneDigits.length > 13) {
-      alert('Confira o telefone: precisa ter código do país + DDD + número (ex: 5545999998888).');
+    if (telefoneDigits.length !== 10 && telefoneDigits.length !== 11) {
+      alert('Confira o telefone: informe DDD + número (ex.: (45) 99999-8888).');
       return;
     }
 
@@ -754,8 +810,9 @@ function openClientModal(id, onSaved) {
     }
 
     const documentoDigits = onlyDigits(qs('#cDocumento').value);
-    if (documentoDigits && documentoDigits.length !== 11 && documentoDigits.length !== 14) {
-      alert('CPF precisa ter 11 números ou CNPJ 14 números. Confira ou deixe em branco.');
+    const tipoCliente = qs('#cTipo').value;
+    if (documentoDigits && !documentoValido(documentoDigits, tipoCliente)) {
+      alert(tipoCliente === 'pj' ? 'Informe um CNPJ válido.' : 'Informe um CPF válido.');
       return;
     }
 
@@ -790,7 +847,7 @@ function openClientModal(id, onSaved) {
 
     const clients = getClients();
     const extra = {
-      tipo: qs('#cTipo').value,
+      tipo: tipoCliente,
       documento: documentoDigits,
       cidade: qs('#cCidade').value.trim(),
       endereco: qs('#cEndereco').value.trim(),
@@ -2431,6 +2488,32 @@ function renderContratos() {
   });
 }
 
+const CONTRATO_CAMPOS_EXTRA = [
+  { grupo: 'Cronograma', key: 'etapa1_prazo', label: '1. Assinatura + entrada', readonly: true },
+  { grupo: 'Cronograma', key: 'etapa2_prazo', label: '2. Envio do briefing/materiais', readonly: true },
+  { grupo: 'Cronograma', key: 'etapa3_prazo', label: '3. Planejamento/wireframes', readonly: true },
+  { grupo: 'Cronograma', key: 'etapa4_prazo', label: '4. Desenvolvimento', readonly: true },
+  { grupo: 'Cronograma', key: 'etapa5_prazo', label: '5. Apresentação da 1ª versão', readonly: true },
+  { grupo: 'Cronograma', key: 'etapa6_prazo', label: '6. Ajustes e revisões', readonly: true },
+  { grupo: 'Cronograma', key: 'etapa7_prazo', label: '7. Testes e homologação', readonly: true },
+  { grupo: 'Cronograma', key: 'etapa8_prazo', label: '8. Publicação e entrega final', readonly: true },
+  { grupo: 'Cronograma', key: 'prazo_total_dias', label: 'Prazo total (dias corridos)', tipo: 'number', min: '0' },
+
+  { grupo: 'Revisões e materiais', key: 'rodadas_revisao', label: 'Rodadas de revisão inclusas', default: '2' },
+  { grupo: 'Revisões e materiais', key: 'prazo_envio_materiais', label: 'Prazo p/ cliente enviar materiais', tipo: 'date' },
+  { grupo: 'Revisões e materiais', key: 'prazo_homologacao_dias', label: 'Prazo de homologação (dias úteis)', default: '5' },
+
+  { grupo: 'Domínio, hospedagem e suporte', key: 'periodo_manutencao_gratuita', label: 'Período de manutenção grátis', placeholder: 'ex: 30 dias' },
+  { grupo: 'Domínio, hospedagem e suporte', key: 'periodo_hospedagem_gratuita', label: 'Período de hospedagem/domínio grátis', placeholder: 'ex: 3 meses' },
+  { grupo: 'Domínio, hospedagem e suporte', key: 'canal_suporte', label: 'Canal de suporte', default: 'WhatsApp, em horário comercial' },
+  { grupo: 'Domínio, hospedagem e suporte', key: 'prazo_resposta_suporte', label: 'Prazo de resposta do suporte (dias úteis)', default: '1' },
+
+  { grupo: 'Foro e assinatura', key: 'foro_comarca', label: 'Comarca do foro' },
+  { grupo: 'Foro e assinatura', key: 'foro_uf', label: 'UF do foro' },
+  { grupo: 'Foro e assinatura', key: 'local_assinatura', label: 'Local da assinatura' },
+  { grupo: 'Foro e assinatura', key: 'data_assinatura_extenso', label: 'Data da assinatura', tipo: 'date' }
+];
+
 function openContratoModal(editingId) {
   const clients = getClients();
   const mensalidades = getMensalidades();
@@ -2466,10 +2549,20 @@ function openContratoModal(editingId) {
           <label class="field-label">CPF/CNPJ</label>
           <input class="input" id="ctDoc" value="${editing ? escapeHtml(editing.contratante_doc || '') : ''}">
         </div>
-        <div class="field">
+        <div class="field" id="ctRepresentanteField">
           <label class="field-label">Representante legal (se PJ)</label>
           <input class="input" id="ctRepresentante" value="${editing ? escapeHtml(editing.contratante_representante || '') : ''}">
         </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Forma de pagamento principal</label>
+        <select class="input" id="campo_forma_pagamento">
+          <option value="PIX" ${editing && editing.forma_pagamento === 'PIX' ? 'selected' : ''}>PIX</option>
+          <option value="Transferência bancária" ${editing && editing.forma_pagamento === 'Transferência bancária' ? 'selected' : ''}>Transferência bancária</option>
+          <option value="Cartão de crédito" ${editing && editing.forma_pagamento === 'Cartão de crédito' ? 'selected' : ''}>Cartão de crédito</option>
+          <option value="Boleto bancário" ${editing && editing.forma_pagamento === 'Boleto bancário' ? 'selected' : ''}>Boleto bancário</option>
+          <option value="Dinheiro" ${editing && editing.forma_pagamento === 'Dinheiro' ? 'selected' : ''}>Dinheiro</option>
+        </select>
       </div>
       <div class="field">
         <label class="field-label">Endereço</label>
@@ -2514,6 +2607,67 @@ function openContratoModal(editingId) {
       </div>
       ` : ''}
 
+      <div class="section-title" style="font-size:14px; margin-top:20px;">Pagamento</div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Valor total do projeto (R$)</label>
+          <input class="input" type="number" min="0" step="0.01" id="campo_valor_total" value="${editing && editing.valor_total ? editing.valor_total.replace(',', '.') : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">Entrada (%)</label>
+          <input class="input" type="number" min="0" max="100" id="campo_entrada_percentual" value="${editing ? escapeHtml(editing.entrada_percentual || '') : ''}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Entrada (R$) — calculado sozinho, mas dá pra ajustar</label>
+          <input class="input" type="number" min="0" step="0.01" id="campo_entrada_valor" value="${editing ? escapeHtml(editing.entrada_valor || '') : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">Saldo (R$) — calculado sozinho</label>
+          <input class="input" type="number" min="0" step="0.01" id="campo_saldo_valor" value="${editing ? escapeHtml(editing.saldo_valor || '') : ''}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Parcelas sem acréscimo (até nº vezes)</label>
+          <input class="input" id="campo_parcelas_sem_juros" value="${editing ? escapeHtml(editing.parcelas_sem_juros || '') : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">Parcelas com acréscimo no cartão (até nº vezes)</label>
+          <input class="input" id="campo_parcelas_com_juros" value="${editing ? escapeHtml(editing.parcelas_com_juros || '') : ''}">
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Valor promocional válido até</label>
+        <input class="input" type="date" id="campo_validade_promocional" value="${editing ? escapeHtml(editing.validade_promocional || '') : ''}">
+      </div>
+
+      <div class="section-title" style="font-size:14px; margin-top:20px;">Manutenção avulsa (sem plano mensal)</div>
+      <div class="field">
+        <label class="field-label">O cliente vai querer a opção de manutenção avulsa?</label>
+        <select class="input" id="campo_avulsaOpcao">
+          <option value="sim" ${editing && editing._avulsaOpcao === 'nao' ? '' : 'selected'}>Sim, oferecer alteração avulsa (sem plano)</option>
+          <option value="nao" ${editing && editing._avulsaOpcao === 'nao' ? 'selected' : ''}>Não — só via plano mensal</option>
+        </select>
+      </div>
+      <div class="field" id="linhaValorAvulso" style="${editing && editing._avulsaOpcao === 'nao' ? 'display:none;' : ''}">
+        <label class="field-label">Valor da alteração avulsa (R$ por solicitação)</label>
+        <input class="input" type="number" min="0" step="0.01" id="campo_valor_alteracao_avulsa" value="${editing ? escapeHtml(editing._valorAvulsoDigitado || '') : ''}">
+      </div>
+
+      ${['Cronograma', 'Revisões e materiais', 'Domínio, hospedagem e suporte', 'Foro e assinatura'].map(grupo => `
+        <div class="section-title" style="font-size:14px; margin-top:20px;">${grupo}</div>
+        <div class="field-row" style="flex-wrap:wrap;">
+          ${CONTRATO_CAMPOS_EXTRA.filter(c => c.grupo === grupo).map(c => `
+            <div class="field" style="flex:1 1 47%; min-width:180px;">
+              <label class="field-label">${c.label}</label>
+              <input class="input" type="${c.tipo || 'text'}" id="campo_${c.key}" placeholder="${c.placeholder || ''}" ${c.min != null ? `min="${c.min}"` : ''} ${c.readonly ? 'readonly' : ''} value="${c.key === 'data_assinatura_extenso' ? (editing ? escapeHtml(editing.data_assinatura || '') : todayISO()) : (editing && editing[c.key] ? escapeHtml(editing[c.key]) : (c.default || ''))}">
+            </div>
+          `).join('')}
+        </div>
+      `).join('')}
+
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="btnCancelContrato">Cancelar</button>
         <button type="submit" class="btn btn-primary">${editing ? 'Salvar e baixar Word' : 'Gerar contrato (Word)'}</button>
@@ -2521,16 +2675,67 @@ function openContratoModal(editingId) {
     </form>
   `);
 
+  function recalcularPagamento() {
+    const total = Number(qs('#campo_valor_total').value) || 0;
+    const pct = Number(qs('#campo_entrada_percentual').value) || 0;
+    if (total && pct) {
+      qs('#campo_entrada_valor').value = (total * pct / 100).toFixed(2);
+      qs('#campo_saldo_valor').value = (total - (total * pct / 100)).toFixed(2);
+    }
+  }
+  qs('#campo_valor_total').addEventListener('input', recalcularPagamento);
+  qs('#campo_entrada_percentual').addEventListener('input', recalcularPagamento);
+
+  function atualizarTipoContratante() {
+    const pj = qs('#ctTipo').value === 'pj';
+    qs('#ctRepresentanteField').style.display = pj ? '' : 'none';
+    qs('#ctRepresentante').required = pj;
+    if (!pj) qs('#ctRepresentante').value = '';
+    const doc = qs('#ctDoc');
+    doc.placeholder = pj ? '00.000.000/0000-00' : '000.000.000-00';
+    doc.value = formatDocumento(onlyDigits(doc.value).slice(0, pj ? 14 : 11));
+  }
+  function atualizarCronograma() {
+    const inicio = qs('#campo_data_assinatura_extenso').value;
+    const total = Number(qs('#campo_prazo_total_dias').value);
+    distribuirCronograma(inicio, total).forEach((data, i) => {
+      qs(`#campo_etapa${i + 1}_prazo`).value = data;
+    });
+  }
+  qs('#ctTipo').onchange = atualizarTipoContratante;
+  qs('#ctDoc').addEventListener('input', e => { e.target.value = formatDocumento(onlyDigits(e.target.value).slice(0, qs('#ctTipo').value === 'pj' ? 14 : 11)); });
+  qs('#ctTelefone').addEventListener('input', e => { e.target.value = formatTelefoneBR(e.target.value); });
+  qs('#campo_data_assinatura_extenso').addEventListener('change', atualizarCronograma);
+  qs('#campo_prazo_total_dias').addEventListener('input', atualizarCronograma);
+  atualizarTipoContratante();
+  if (!editing || !editing.etapa1_prazo) atualizarCronograma();
+
+  const ctOrcamentoSelect = qs('#ctOrcamento');
+  if (ctOrcamentoSelect) {
+    ctOrcamentoSelect.onchange = () => {
+      const o = getOrcamentos().find(x => x.id === ctOrcamentoSelect.value);
+      if (o && o.totalUnico > 0) {
+        qs('#campo_valor_total').value = o.totalUnico;
+        recalcularPagamento();
+      }
+    };
+  }
+
+  qs('#campo_avulsaOpcao').onchange = () => {
+    qs('#linhaValorAvulso').style.display = qs('#campo_avulsaOpcao').value === 'nao' ? 'none' : '';
+  };
+
   qs('#ctClienteExistente').onchange = () => {
     const c = clientById(qs('#ctClienteExistente').value);
     if (!c) return;
     qs('#ctTipo').value = c.tipo === 'pj' ? 'pj' : 'pf';
+    atualizarTipoContratante();
     qs('#ctNome').value = c.nome || '';
     qs('#ctDoc').value = formatDocumento(c.documento || '') || '';
     qs('#ctEndereco').value = c.endereco || '';
     qs('#ctCidadeUf').value = c.cidade || '';
     qs('#ctEmail').value = c.email || '';
-    qs('#ctTelefone').value = c.telefone || '';
+    qs('#ctTelefone').value = formatTelefoneBR(c.telefone || '');
   };
 
   qs('#btnCancelContrato').onclick = closeModal;
@@ -2538,6 +2743,17 @@ function openContratoModal(editingId) {
     e.preventDefault();
     const nome = qs('#ctNome').value.trim();
     if (!nome) { alert('Digite o nome do contratante.'); return; }
+    const tipo = qs('#ctTipo').value;
+    const documento = onlyDigits(qs('#ctDoc').value);
+    if (!documentoValido(documento, tipo)) {
+      alert(tipo === 'pj' ? 'Informe um CNPJ válido.' : 'Informe um CPF válido.');
+      return;
+    }
+    const telefone = onlyDigits(qs('#ctTelefone').value);
+    if (telefone.length !== 10 && telefone.length !== 11) {
+      alert('Informe um telefone válido com DDD (ex.: (45) 99999-8888).');
+      return;
+    }
 
     const planoId = qs('#ctPlano').value;
     const plano = planoId ? planoById(planoId) : null;
@@ -2545,23 +2761,48 @@ function openContratoModal(editingId) {
     const orcamentoId = orcamentoSel ? orcamentoSel.value : '';
     const orcamento = orcamentoId ? getOrcamentos().find(o => o.id === orcamentoId) : null;
 
+    const valorTotalDigitado = qs('#campo_valor_total').value;
+    const valorTotalFinal = valorTotalDigitado !== '' ? Number(valorTotalDigitado)
+      : (orcamento && orcamento.totalUnico > 0 ? orcamento.totalUnico : null);
+    const entradaPct = qs('#campo_entrada_percentual').value;
+
+    const avulsaOpcao = qs('#campo_avulsaOpcao').value;
+    const valorAvulsoDigitado = qs('#campo_valor_alteracao_avulsa').value;
+
+    const extras = {};
+    CONTRATO_CAMPOS_EXTRA.forEach(c => { extras[c.key] = qs('#campo_' + c.key).value.trim(); });
+    const dataAssinatura = extras.data_assinatura_extenso;
+    extras.data_assinatura_extenso = dataPorExtenso(dataAssinatura);
+
     const dados = {
       _clientId: qs('#ctClienteExistente').value || null,
-      _tipo: qs('#ctTipo').value,
+      _tipo: tipo,
       _planoId: planoId || null,
       _orcamentoId: orcamentoId || null,
+      _avulsaOpcao: avulsaOpcao,
+      _valorAvulsoDigitado: valorAvulsoDigitado,
       contratante_nome: nome,
-      contratante_doc: qs('#ctDoc').value.trim(),
-      contratante_representante: qs('#ctRepresentante').value.trim(),
+      contratante_doc: formatDocumento(documento),
+      contratante_representante: tipo === 'pj' ? qs('#ctRepresentante').value.trim() : '',
       contratante_endereco: qs('#ctEndereco').value.trim(),
       contratante_cidade_uf: qs('#ctCidadeUf').value.trim(),
       contratante_cep: qs('#ctCep').value.trim(),
       contratante_email: qs('#ctEmail').value.trim(),
-      contratante_telefone: qs('#ctTelefone').value.trim(),
+      contratante_telefone: formatTelefoneBR(telefone),
+      forma_pagamento: qs('#campo_forma_pagamento').value,
+      data_assinatura: dataAssinatura,
       planoNome: plano ? plano.nome : '',
       valor_mensalidade_base: plano ? String(plano.valor).replace('.', ',') : '',
-      valor_total: orcamento && orcamento.totalUnico > 0 ? String(orcamento.totalUnico).replace('.', ',') : '',
-      valor_dev_principal: orcamento && orcamento.totalUnico > 0 ? String(orcamento.totalUnico).replace('.', ',') : '',
+      valor_total: valorTotalFinal != null ? String(valorTotalFinal).replace('.', ',') : '',
+      valor_dev_principal: valorTotalFinal != null ? String(valorTotalFinal).replace('.', ',') : '',
+      entrada_percentual: entradaPct ? String(entradaPct) : '',
+      entrada_valor: qs('#campo_entrada_valor').value ? String(qs('#campo_entrada_valor').value).replace('.', ',') : '',
+      saldo_percentual: entradaPct ? String(100 - Number(entradaPct)) : '',
+      saldo_valor: qs('#campo_saldo_valor').value ? String(qs('#campo_saldo_valor').value).replace('.', ',') : '',
+      valor_alteracao_avulsa: avulsaOpcao === 'nao'
+        ? 'Não aplicável — manutenção somente via plano mensal contratado'
+        : (valorAvulsoDigitado ? String(valorAvulsoDigitado).replace('.', ',') : ''),
+      ...extras,
       criadoEm: editing ? editing.criadoEm : todayISO()
     };
 
