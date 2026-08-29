@@ -19,3 +19,15 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
+
+// Cache local do Firestore: o app abre e mostra os últimos dados vistos
+// mesmo sem internet, e sincroniza sozinho assim que a conexão voltar.
+db.enablePersistence({ synchronizeTabs: true }).catch(err => {
+  if (err.code === 'failed-precondition') {
+    // Normal quando o app está aberto em mais de uma aba ao mesmo tempo —
+    // só a primeira aba consegue ativar o cache offline.
+    console.warn('Cache offline ativo em outra aba deste navegador.');
+  } else if (err.code === 'unimplemented') {
+    console.warn('Este navegador não suporta cache offline do Firestore.');
+  }
+});

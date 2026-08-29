@@ -151,6 +151,32 @@ input, textarea, select{font-family:inherit;}
   z-index:200;
 }
 .sync-banner.show{bottom:24px;}
+.sync-banner{display:flex; align-items:center; gap:12px; justify-content:center; flex-wrap:wrap;}
+.sync-retry-btn{background:rgba(255,255,255,0.15); color:#fff; border-color:rgba(255,255,255,0.5);}
+.sync-retry-btn:hover{background:rgba(255,255,255,0.25); border-color:#fff;}
+
+/* ---------- BUSCA E FILTROS (Clientes / Cobranças) ---------- */
+.filter-bar{
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+  margin:14px 0 18px;
+}
+.filter-search{flex:1; min-width:220px;}
+.filter-select{max-width:220px;}
+
+/* pílula de contagem (ex: itens na lixeira) */
+.count-pill{
+  display:inline-block;
+  background:var(--brick-bg);
+  color:var(--brick);
+  font-size:11px;
+  font-weight:600;
+  padding:2px 8px;
+  border-radius:20px;
+  margin-left:6px;
+  vertical-align:middle;
+}
 
 .colab-banner{
   background:var(--amber-bg);
