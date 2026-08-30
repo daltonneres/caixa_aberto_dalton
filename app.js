@@ -235,14 +235,11 @@ let _contratos = [];
 let _mensalidades = [];
 let _colaboradores = [];
 let _settings = {};
-let _lixeira = [];
-let _historico = [];
 let _docRef = null;
 let _unsubscribeSnapshot = null;
 let _saveTimer = null;
 let _meuUid = null;
 let _syncTargetUid = null;
-let _pendingRetryTimer = null;
 
 function getClients() { return _clients; }
 function getCharges() { return _charges; }
@@ -253,8 +250,6 @@ function getContratos() { return _contratos; }
 function getMensalidades() { return _mensalidades; }
 function getColaboradores() { return _colaboradores; }
 function getSettings() { return _settings; }
-function getLixeira() { return _lixeira; }
-function getHistorico() { return _historico; }
 
 function saveClients(list) { _clients = list; queuePersist(); }
 function saveCharges(list) { _charges = list; queuePersist(); }
@@ -263,72 +258,10 @@ function saveServicos(list) { _servicos = list; queuePersist(); }
 function saveOrcamentos(list) { _orcamentos = list; queuePersist(); }
 function saveContratos(list) { _contratos = list; queuePersist(); }
 function saveMensalidades(list) { _mensalidades = list; queuePersist(); }
-function saveColaboradores(list) {
-  _colaboradores = list;
-  // lista simples de UIDs, mantida à parte pra dar pra checar nas regras de
-  // segurança do Firestore sem precisar percorrer objetos (veja firestore.rules)
-  _settings = { ..._settings, colaboradoresUids: list.map(c => c.uid) };
-  queuePersist();
-}
+function saveColaboradores(list) { _colaboradores = list; queuePersist(); }
 function saveSettings(s) { _settings = s; queuePersist(); }
-function saveLixeira(list) { _lixeira = list; queuePersist(); }
 
 function clientById(id) { return getClients().find(c => c.id === id); }
-
-// ---------- HISTÓRICO (registro simples de ações, só leitura) ----------
-// Guarda as últimas ações pra dar visibilidade de quem mudou o quê e quando.
-// Não é um sistema de auditoria completo (não versiona o conteúdo inteiro),
-// mas ajuda a entender o que aconteceu numa conta com mais de uma pessoa.
-const HISTORICO_MAX = 200;
-function logHistorico(acao, detalhe) {
-  const settings = getSettings();
-  const autor = settings.seuNome || (auth.currentUser ? auth.currentUser.email : 'alguém');
-  const entrada = { id: uid(), quando: new Date().toISOString(), acao, detalhe: detalhe || '', autor };
-  _historico = [entrada, ..._historico].slice(0, HISTORICO_MAX);
-  queuePersist();
-}
-
-// ---------- LIXEIRA (soft-delete com restauração por 30 dias) ----------
-const LIXEIRA_DIAS = 30;
-function moveToTrash(tipo, dados, labelAcao) {
-  const expiraEm = new Date(Date.now() + LIXEIRA_DIAS * 86400000).toISOString();
-  _lixeira = [{ id: uid(), tipo, dados, excluidoEm: new Date().toISOString(), expiraEm }, ..._lixeira];
-  if (labelAcao) logHistorico('Excluiu', labelAcao);
-}
-function purgeOldTrash() {
-  const agora = new Date().toISOString();
-  const antes = _lixeira.length;
-  _lixeira = _lixeira.filter(t => t.expiraEm > agora);
-  if (_lixeira.length !== antes) queuePersist();
-}
-function restoreFromTrash(trashId) {
-  const item = _lixeira.find(t => t.id === trashId);
-  if (!item) return;
-  _lixeira = _lixeira.filter(t => t.id !== trashId);
-  const listas = {
-    cliente: [_clients, l => _clients = l],
-    cobranca: [_charges, l => _charges = l],
-    reuniao: [_meetings, l => _meetings = l],
-    contrato: [_contratos, l => _contratos = l],
-    servico: [_servicos, l => _servicos = l],
-    mensalidade: [_mensalidades, l => _mensalidades = l],
-    orcamento: [_orcamentos, l => _orcamentos = l]
-  };
-  const par = listas[item.tipo];
-  if (par) par[1]([item.dados, ...par[0]]);
-  logHistorico('Restaurou', descreverItemLixeira(item));
-  queuePersist();
-}
-function excluirDefinitivo(trashId) {
-  _lixeira = _lixeira.filter(t => t.id !== trashId);
-  queuePersist();
-}
-function descreverItemLixeira(item) {
-  const nomes = { cliente: 'cliente', cobranca: 'cobrança', reuniao: 'reunião', contrato: 'contrato', servico: 'serviço', mensalidade: 'mensalidade', orcamento: 'orçamento' };
-  const d = item.dados || {};
-  const rotulo = d.nome || d.descricao || d.titulo || d.contratante_nome || d.nomeContato || '(sem nome)';
-  return `${nomes[item.tipo] || item.tipo}: ${rotulo}`;
-}
 
 // status real da cobrança (calcula atraso na hora)
 function chargeStatus(charge) {
@@ -337,54 +270,28 @@ function chargeStatus(charge) {
   return 'pendente';
 }
 
-// ---------- controle de estado de salvamento (pra avisar antes de fechar a aba) ----------
-let _saveState = 'ok'; // 'ok' | 'pendente' | 'erro'
-let _lastSnapshotToSave = null;
-
 // agrupa várias mudanças rápidas seguidas numa única escrita no Firestore
 function queuePersist() {
   if (!_docRef) return;
-  _saveState = 'pendente';
   clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(() => doPersist(), 300);
-}
-
-function buildSnapshot() {
-  return {
-    clients: _clients,
-    charges: _charges,
-    meetings: _meetings,
-    servicos: _servicos,
-    orcamentos: _orcamentos,
-    contratos: _contratos,
-    mensalidades: _mensalidades,
-    colaboradores: _colaboradores,
-    lixeira: _lixeira,
-    historico: _historico,
-    settings: _settings,
-    updatedAt: new Date().toISOString()
-  };
-}
-
-function doPersist() {
-  if (!_docRef) return;
-  clearTimeout(_pendingRetryTimer);
-  const snapshot = buildSnapshot();
-  _lastSnapshotToSave = snapshot;
-  _docRef.set(snapshot, { merge: true }).then(() => {
-    _saveState = 'ok';
-    hideSyncError();
-  }).catch(err => {
-    console.error('Erro ao salvar no Firebase:', err);
-    _saveState = 'erro';
-    showSyncError();
-    // tenta de novo sozinho depois de um tempinho, sem precisar o usuário fazer nada
-    _pendingRetryTimer = setTimeout(() => {
-      if (_saveState === 'erro' && _docRef) _docRef.set(_lastSnapshotToSave, { merge: true })
-        .then(() => { _saveState = 'ok'; hideSyncError(); })
-        .catch(() => {}); // se falhar de novo, o banner com "tentar novamente" segue visível
-    }, 8000);
-  });
+  _saveTimer = setTimeout(() => {
+    _docRef.set({
+      clients: _clients,
+      charges: _charges,
+      meetings: _meetings,
+      servicos: _servicos,
+      orcamentos: _orcamentos,
+      contratos: _contratos,
+      mensalidades: _mensalidades,
+      colaboradores: _colaboradores.map(c => c.uid),
+      colaboradoresInfo: _colaboradores,
+      settings: _settings,
+      updatedAt: new Date().toISOString()
+    }, { merge: true }).catch(err => {
+      console.error('Erro ao salvar no Firebase:', err);
+      showSyncError();
+    });
+  }, 300);
 }
 
 function showSyncError() {
@@ -393,25 +300,13 @@ function showSyncError() {
     el = document.createElement('div');
     el.id = 'syncError';
     el.className = 'sync-banner';
-    el.innerHTML = `<span id="syncErrorText"></span> <button type="button" class="btn btn-ghost btn-sm sync-retry-btn" id="btnRetrySync">Tentar de novo</button>`;
     document.body.appendChild(el);
-    qs('#btnRetrySync', el).onclick = () => doPersist();
   }
-  qs('#syncErrorText', el).textContent = 'Não consegui salvar na nuvem agora. Confira sua internet — a última alteração pode não ter sido salva.';
+  el.textContent = 'Não consegui salvar na nuvem agora. Confira sua internet — a última alteração pode não ter sido salva.';
   el.classList.add('show');
+  clearTimeout(el._hideTimer);
+  el._hideTimer = setTimeout(() => el.classList.remove('show'), 6000);
 }
-function hideSyncError() {
-  const el = qs('#syncError');
-  if (el) el.classList.remove('show');
-}
-
-// avisa antes de fechar/recarregar a aba se ainda houver algo não salvo
-window.addEventListener('beforeunload', (e) => {
-  if (_saveState === 'pendente' || _saveState === 'erro') {
-    e.preventDefault();
-    e.returnValue = '';
-  }
-});
 
 // mantém a página onde o usuário estava, mesmo quando os dados
 // chegam de novo pelo Firestore (própria escrita ou outro aparelho)
@@ -430,11 +325,8 @@ function startFirestoreSync(donoUid) {
     _orcamentos = data.orcamentos || [];
     _contratos = data.contratos || [];
     _mensalidades = data.mensalidades || [];
-    _colaboradores = data.colaboradores || [];
-    _lixeira = data.lixeira || [];
-    _historico = data.historico || [];
+    _colaboradores = data.colaboradoresInfo || (data.colaboradores || []).map(uid => ({ uid, apelido: '' }));
     _settings = data.settings || {};
-    purgeOldTrash();
     if (_settings.tema) {
       localStorage.setItem('ca_tema', _settings.tema);
       applyTheme(_settings.tema);
@@ -448,8 +340,16 @@ function startFirestoreSync(donoUid) {
   }, err => {
     console.error('Erro ao sincronizar com o Firebase:', err);
     if (err.code === 'permission-denied') {
-      alert('Você não tem mais permissão de acesso a esses dados (talvez o vínculo tenha sido removido). Vamos te mostrar seus próprios dados.');
-      desvincularConta(true);
+      const estavaVinculado = _syncTargetUid && _meuUid && _syncTargetUid !== _meuUid;
+      if (estavaVinculado) {
+        alert('Ainda não consigo acessar esses dados. Isso costuma acontecer quando o dono ainda não te adicionou como colaborador(a), ou quando as regras do Firestore ainda não foram atualizadas. O vínculo continua salvo — assim que isso for resolvido, é só recarregar a página que volta a funcionar sozinho. Por enquanto vou te mostrar seus próprios dados (vazios).');
+        if (_unsubscribeSnapshot) _unsubscribeSnapshot();
+        _unsubscribeSnapshot = null;
+        _docRef = null;
+        startFirestoreSync(_meuUid); // fallback só na tela, sem apagar o vínculo salvo no Firestore
+      } else {
+        showSyncError();
+      }
     } else {
       showSyncError();
     }
@@ -501,7 +401,7 @@ function stopFirestoreSync() {
   if (_unsubscribeSnapshot) _unsubscribeSnapshot();
   _unsubscribeSnapshot = null;
   _docRef = null;
-  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _lixeira = []; _historico = []; _settings = {};
+  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _settings = {};
 }
 
 // ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
@@ -766,26 +666,8 @@ function renderDashboard() {
 }
 
 // ---------- CLIENTES ----------
-let _filtroClientes = '';
-let _filtroClientesStatus = 'todos';
-
 function renderClientes() {
-  const todos = getClients();
-  const termo = _filtroClientes.trim().toLowerCase();
-
-  const clients = todos.filter(c => {
-    if (termo) {
-      const alvo = `${c.nome} ${c.telefone || ''} ${c.email || ''} ${c.cidade || ''}`.toLowerCase();
-      if (!alvo.includes(termo)) return false;
-    }
-    if (_filtroClientesStatus !== 'todos') {
-      const totalAberto = getCharges().filter(ch => ch.clientId === c.id && chargeStatus(ch) !== 'pago').length;
-      if (_filtroClientesStatus === 'aberto' && totalAberto === 0) return false;
-      if (_filtroClientesStatus === 'emdia' && totalAberto > 0) return false;
-    }
-    return true;
-  });
-
+  const clients = getClients();
   qs('#main').innerHTML = `
     <div class="view-header">
       <div>
@@ -794,16 +676,7 @@ function renderClientes() {
       </div>
       <button class="btn btn-primary" id="btnNovoCliente">+ Novo cliente</button>
     </div>
-    ${todos.length === 0 ? emptyState('Nenhum cliente ainda', 'Cadastre o primeiro cliente para começar a lançar cobranças.') : `
-      <div class="filter-bar">
-        <input class="input filter-search" id="clientesBusca" placeholder="Buscar por nome, telefone, e-mail ou cidade..." value="${escapeHtml(_filtroClientes)}">
-        <select class="input filter-select" id="clientesFiltroStatus">
-          <option value="todos" ${_filtroClientesStatus === 'todos' ? 'selected' : ''}>Todos</option>
-          <option value="aberto" ${_filtroClientesStatus === 'aberto' ? 'selected' : ''}>Com valor em aberto</option>
-          <option value="emdia" ${_filtroClientesStatus === 'emdia' ? 'selected' : ''}>Em dia</option>
-        </select>
-      </div>
-      ${clients.length === 0 ? emptyState('Nenhum resultado', 'Nenhum cliente encontrado com esse filtro.') : `
+    ${clients.length === 0 ? emptyState('Nenhum cliente ainda', 'Cadastre o primeiro cliente para começar a lançar cobranças.') : `
       <div class="ledger">
         ${clients.map(c => {
           const totalAberto = getCharges().filter(ch => ch.clientId === c.id && chargeStatus(ch) !== 'pago')
@@ -828,7 +701,6 @@ function renderClientes() {
           </div>`;
         }).join('')}
       </div>
-      `}
     `}
   `;
 
@@ -837,38 +709,16 @@ function renderClientes() {
   qsa('[data-edit-client]').forEach(b => b.onclick = () => openClientModal(b.dataset.editClient));
   qsa('[data-del-client]').forEach(b => b.onclick = () => {
     const id = b.dataset.delClient;
-    const cliente = clientById(id);
-    const cobrancasCliente = getCharges().filter(ch => ch.clientId === id);
-    const msg = cobrancasCliente.length > 0
-      ? 'Este cliente tem cobranças lançadas. Excluir o cliente também vai mover as cobranças dele pra lixeira. Confirma?'
-      : 'Excluir este cliente? Ele fica na lixeira por 30 dias, dá pra restaurar em Configurações.';
+    const temCobranca = getCharges().some(ch => ch.clientId === id);
+    const msg = temCobranca
+      ? 'Este cliente tem cobranças lançadas. Excluir o cliente também vai apagar as cobranças dele. Confirma?'
+      : 'Excluir este cliente?';
     if (confirm(msg)) {
-      moveToTrash('cliente', cliente, `cliente ${cliente.nome}`);
-      cobrancasCliente.forEach(ch => moveToTrash('cobranca', ch));
       saveClients(getClients().filter(c => c.id !== id));
       saveCharges(getCharges().filter(ch => ch.clientId !== id));
-      saveLixeira(getLixeira());
       renderClientes();
     }
   });
-
-  const buscaEl = qs('#clientesBusca');
-  if (buscaEl) {
-    buscaEl.oninput = () => { _filtroClientes = buscaEl.value; renderClientesListaOnly(); };
-    // mantém o foco no campo enquanto digita, mesmo re-renderizando a lista
-    const pos = buscaEl.selectionStart;
-    buscaEl.focus();
-    buscaEl.setSelectionRange(pos, pos);
-  }
-  const statusEl = qs('#clientesFiltroStatus');
-  if (statusEl) statusEl.onchange = () => { _filtroClientesStatus = statusEl.value; renderClientes(); };
-}
-
-// re-renderiza só a lista/filtro (sem perder o foco do campo de busca a cada tecla)
-let _clientesDebounce = null;
-function renderClientesListaOnly() {
-  clearTimeout(_clientesDebounce);
-  _clientesDebounce = setTimeout(() => renderClientes(), 150);
 }
 
 function openClientModal(id, onSaved) {
@@ -1078,10 +928,8 @@ function openClientModal(id, onSaved) {
     if (editing) {
       const idx = clients.findIndex(c => c.id === editing.id);
       clients[idx] = { ...editing, nome, telefone: telefoneDigits, email: emailVal, obs: qs('#cObs').value.trim(), ...extra };
-      logHistorico('Editou', `cliente ${nome}`);
     } else {
       clients.push({ id: uid(), nome, telefone: telefoneDigits, email: emailVal, obs: qs('#cObs').value.trim(), projetos: [], ...extra });
-      logHistorico('Cadastrou', `cliente ${nome}`);
     }
     saveClients(clients);
     closeModal();
@@ -1304,31 +1152,8 @@ function openProjectModal(clientId, projectId) {
 }
 
 // ---------- COBRANÇAS ----------
-let _filtroCobrancas = '';
-let _filtroCobrancasStatus = 'todos';
-
 function renderCobrancas() {
-  const todas = getCharges().sort((a, b) => a.vencimento.localeCompare(b.vencimento));
-  const termo = _filtroCobrancas.trim().toLowerCase();
-
-  const charges = todas.filter(c => {
-    const status = chargeStatus(c);
-    if (_filtroCobrancasStatus !== 'todos' && status !== _filtroCobrancasStatus) return false;
-    if (termo) {
-      const client = c.clientId ? clientById(c.clientId) : null;
-      const nome = client ? client.nome : (c.avulsoNome || '');
-      const alvo = `${nome} ${c.descricao || ''}`.toLowerCase();
-      if (!alvo.includes(termo)) return false;
-    }
-    return true;
-  });
-
-  const atrasadosComContato = todas.filter(c => {
-    if (chargeStatus(c) !== 'atrasado') return false;
-    const client = c.clientId ? clientById(c.clientId) : null;
-    const telefone = client ? client.telefone : c.avulsoTelefone;
-    return !!(telefone && onlyDigits(telefone).length >= 10);
-  });
+  const charges = getCharges().sort((a, b) => a.vencimento.localeCompare(b.vencimento));
 
   qs('#main').innerHTML = `
     <div class="view-header">
@@ -1336,83 +1161,14 @@ function renderCobrancas() {
         <div class="view-title">Cobranças</div>
         <div class="view-desc">Lance cobranças de clientes ou vendas avulsas (quem não é cliente fixo)</div>
       </div>
-      <div style="display:flex; gap:8px; flex-wrap:wrap;">
-        ${atrasadosComContato.length > 0 ? `<button class="btn btn-whatsapp" id="btnCobrarAtrasados">💬 Cobrar ${atrasadosComContato.length} atrasado${atrasadosComContato.length > 1 ? 's' : ''}</button>` : ''}
-        <button class="btn btn-primary" id="btnNovaCobranca">+ Nova cobrança</button>
-      </div>
+      <button class="btn btn-primary" id="btnNovaCobranca">+ Nova cobrança</button>
     </div>
-    ${todas.length === 0 ? emptyState('Nenhuma cobrança lançada', 'Clique em "Nova cobrança" para começar.') : `
-      <div class="filter-bar">
-        <input class="input filter-search" id="cobrancasBusca" placeholder="Buscar por cliente ou descrição..." value="${escapeHtml(_filtroCobrancas)}">
-        <select class="input filter-select" id="cobrancasFiltroStatus">
-          <option value="todos" ${_filtroCobrancasStatus === 'todos' ? 'selected' : ''}>Todos os status</option>
-          <option value="pendente" ${_filtroCobrancasStatus === 'pendente' ? 'selected' : ''}>Pendente</option>
-          <option value="atrasado" ${_filtroCobrancasStatus === 'atrasado' ? 'selected' : ''}>Atrasado</option>
-          <option value="pago" ${_filtroCobrancasStatus === 'pago' ? 'selected' : ''}>Pago</option>
-        </select>
-      </div>
-      ${charges.length === 0 ? emptyState('Nenhum resultado', 'Nenhuma cobrança encontrada com esse filtro.') : renderChargeLedger(charges, { compact: false })}
-    `}
+    ${charges.length === 0 ? emptyState('Nenhuma cobrança lançada', 'Clique em "Nova cobrança" para começar.') :
+      renderChargeLedger(charges, { compact: false })}
   `;
 
   qs('#btnNovaCobranca').onclick = () => openChargeModal();
-  const btnCobrarAtrasados = qs('#btnCobrarAtrasados');
-  if (btnCobrarAtrasados) btnCobrarAtrasados.onclick = () => openCobrarAtrasadosModal(atrasadosComContato);
   bindChargeActions();
-
-  const buscaEl = qs('#cobrancasBusca');
-  if (buscaEl) {
-    buscaEl.oninput = () => { _filtroCobrancas = buscaEl.value; renderCobrancasDebounced(); };
-    const pos = buscaEl.selectionStart;
-    buscaEl.focus();
-    buscaEl.setSelectionRange(pos, pos);
-  }
-  const statusEl = qs('#cobrancasFiltroStatus');
-  if (statusEl) statusEl.onchange = () => { _filtroCobrancasStatus = statusEl.value; renderCobrancas(); };
-}
-
-let _cobrancasDebounce = null;
-function renderCobrancasDebounced() {
-  clearTimeout(_cobrancasDebounce);
-  _cobrancasDebounce = setTimeout(() => renderCobrancas(), 150);
-}
-
-// Modal com a lista de atrasados pra cobrar um por um pelo WhatsApp — abrir
-// várias abas de uma vez costuma ser bloqueado pelo navegador, então aqui é
-// clique a clique, mas tudo já concentrado num só lugar.
-function openCobrarAtrasadosModal(atrasados) {
-  openModal(`
-    <div class="modal-title">Cobrar atrasados (${atrasados.length})</div>
-    <p class="view-desc" style="margin:-8px 0 14px;">Clique em cada um pra abrir a mensagem pronta no WhatsApp. Depois de enviar, ele some desta lista.</p>
-    <div class="ledger" id="listaAtrasados">
-      ${atrasados.map(c => {
-        const client = c.clientId ? clientById(c.clientId) : { nome: c.avulsoNome, telefone: c.avulsoTelefone };
-        return `
-        <div class="ledger-row" data-linha-atrasado="${c.id}">
-          <div class="ledger-main">
-            <div class="ledger-title">${escapeHtml(client.nome)}</div>
-            <div class="ledger-sub">${escapeHtml(c.descricao)} · vence ${formatDateBR(c.vencimento)}</div>
-          </div>
-          <div class="ledger-value">${formatCurrency(c.valor)}</div>
-          <div class="ledger-actions">
-            <button class="btn btn-whatsapp btn-sm" data-cobrar-um="${c.id}">Enviar</button>
-          </div>
-        </div>`;
-      }).join('')}
-    </div>
-    <div class="modal-actions">
-      <button type="button" class="btn btn-ghost" id="btnFecharCobrarAtrasados">Fechar</button>
-    </div>
-  `);
-  qs('#btnFecharCobrarAtrasados').onclick = () => { closeModal(); navigate(currentView); };
-  qsa('[data-cobrar-um]').forEach(b => b.onclick = () => {
-    const chargeId = b.dataset.cobrarUm;
-    const charge = getCharges().find(c => c.id === chargeId);
-    const client = charge.clientId ? clientById(charge.clientId) : { nome: charge.avulsoNome, telefone: charge.avulsoTelefone };
-    window.open(`https://wa.me/${onlyDigits(client.telefone)}?text=${encodeURIComponent(buildMessage(charge, client))}`, '_blank');
-    const linha = qs(`[data-linha-atrasado="${chargeId}"]`);
-    if (linha) linha.remove();
-  });
 }
 
 function renderChargeLedger(charges, opts = {}) {
@@ -1454,11 +1210,8 @@ function bindChargeActions() {
   qsa('[data-add-comprovante]').forEach(b => b.onclick = () => openComprovanteModal(b.dataset.addComprovante));
   qsa('[data-recibo-charge]').forEach(b => b.onclick = () => gerarReciboPDF(b.dataset.reciboCharge));
   qsa('[data-del-charge]').forEach(b => b.onclick = () => {
-    if (confirm('Excluir esta cobrança? Ela fica na lixeira por 30 dias, dá pra restaurar em Configurações.')) {
-      const charge = getCharges().find(c => c.id === b.dataset.delCharge);
-      moveToTrash('cobranca', charge, `cobrança ${charge.descricao}`);
+    if (confirm('Excluir esta cobrança?')) {
       saveCharges(getCharges().filter(c => c.id !== b.dataset.delCharge));
-      saveLixeira(getLixeira());
       navigate(currentView);
     }
   });
@@ -1489,7 +1242,6 @@ function openMarkPaidModal(chargeId) {
     charges[idx].status = 'pago';
     charges[idx].dataPagamento = qs('#mpData').value || todayISO();
     charges[idx].comprovanteLink = link || null;
-    logHistorico('Recebeu', `cobrança ${charges[idx].descricao} — ${formatCurrency(charges[idx].valor)}`);
     saveCharges(charges);
     closeModal();
     navigate(currentView);
@@ -1674,18 +1426,16 @@ function openChargeModal(presets, onSaved) {
       extra = { clientId, avulsoNome: null, avulsoTelefone: null };
     }
     const charges = getCharges();
-    const descricao = qs('#chDescricao').value.trim();
     charges.push({
       id: uid(),
       ...extra,
-      descricao,
+      descricao: qs('#chDescricao').value.trim(),
       valor: Number(qs('#chValor').value),
       vencimento: qs('#chVencimento').value,
       status: 'pendente',
       dataPagamento: null,
       createdAt: todayISO()
     });
-    logHistorico('Lançou', `cobrança ${descricao} — ${formatCurrency(Number(qs('#chValor').value))}`);
     saveCharges(charges);
     closeModal();
     if (onSaved) onSaved(); else navigate(currentView);
@@ -1769,8 +1519,6 @@ function bindMeetingActions(afterChange) {
   });
   qsa('[data-del-meeting]').forEach(b => b.onclick = () => {
     if (confirm('Excluir esta reunião?')) {
-      const reuniao = getMeetings().find(m => m.id === b.dataset.delMeeting);
-      moveToTrash('reuniao', reuniao, `reunião ${reuniao.titulo}`);
       saveMeetings(getMeetings().filter(m => m.id !== b.dataset.delMeeting));
       afterChange();
     }
@@ -2090,8 +1838,6 @@ function renderServicos() {
   qsa('[data-edit-servico]').forEach(b => b.onclick = () => openServiceModal(b.dataset.editServico));
   qsa('[data-del-servico]').forEach(b => b.onclick = () => {
     if (confirm('Excluir este serviço do catálogo?')) {
-      const servico = getServicos().find(s => s.id === b.dataset.delServico);
-      moveToTrash('servico', servico, `serviço ${servico.nome}`);
       saveServicos(getServicos().filter(s => s.id !== b.dataset.delServico));
       renderServicos();
     }
@@ -2121,8 +1867,6 @@ function renderServicos() {
   qsa('[data-editar-orcamento]').forEach(b => b.onclick = () => openOrcamentoSimplesModal(b.dataset.editarOrcamento));
   qsa('[data-del-orcamento]').forEach(b => b.onclick = () => {
     if (confirm('Excluir este orçamento do histórico?')) {
-      const orcamento = getOrcamentos().find(o => o.id === b.dataset.delOrcamento);
-      moveToTrash('orcamento', orcamento, `orçamento ${orcamento.nomeContato}`);
       saveOrcamentos(getOrcamentos().filter(o => o.id !== b.dataset.delOrcamento));
       renderServicos();
     }
@@ -2580,8 +2324,6 @@ function renderMensalidades() {
       ? `${emUso} cliente${emUso > 1 ? 's estão' : ' está'} usando esse plano. Excluir aqui não muda o que já foi salvo no cadastro deles, mas o plano some da lista de opções. Confirma?`
       : 'Excluir este plano?';
     if (confirm(msg)) {
-      const mensalidade = getMensalidades().find(p => p.id === b.dataset.delMensalidade);
-      moveToTrash('mensalidade', mensalidade, `mensalidade ${mensalidade.nome}`);
       saveMensalidades(getMensalidades().filter(p => p.id !== b.dataset.delMensalidade));
       renderMensalidades();
     }
@@ -2803,8 +2545,6 @@ function renderContratos() {
   qsa('[data-editar-contrato]').forEach(b => b.onclick = () => openContratoModal(b.dataset.editarContrato));
   qsa('[data-del-contrato]').forEach(b => b.onclick = () => {
     if (confirm('Excluir este contrato do histórico?')) {
-      const contrato = getContratos().find(c => c.id === b.dataset.delContrato);
-      moveToTrash('contrato', contrato, `contrato de ${contrato.contratante_nome}`);
       saveContratos(getContratos().filter(c => c.id !== b.dataset.delContrato));
       renderContratos();
     }
@@ -3211,12 +2951,9 @@ async function gerarContratoPDF(registro) {
 
 // ---------- CONFIGURAÇÕES ----------
 function renderConfig() {
-  purgeOldTrash();
   const s = getSettings();
   const clients = getClients();
   const charges = getCharges();
-  const lixeira = getLixeira();
-  const historico = getHistorico();
 
   qs('#main').innerHTML = `
     <div class="view-header">
@@ -3290,7 +3027,8 @@ function renderConfig() {
         <input class="input" id="donoUidCampo" placeholder="Cole aqui">
       </div>
     </div>
-    <button class="btn btn-ghost btn-sm" id="btnVincular" style="margin-bottom:32px;">Vincular</button>
+    <button class="btn btn-ghost btn-sm" id="btnVincular">Vincular</button>
+    <button class="btn btn-ghost btn-sm" id="btnReconectar" style="margin-bottom:32px;">🔄 Tentar reconectar</button>
 
     <div class="section-title">Seus dados</div>
     <form id="settingsForm" style="max-width:420px; margin-bottom:32px;">
@@ -3357,51 +3095,11 @@ function renderConfig() {
       <button type="submit" class="btn btn-primary">Salvar</button>
     </form>
 
-    <div class="section-title">Lixeira ${lixeira.length > 0 ? `<span class="count-pill">${lixeira.length}</span>` : ''}</div>
-    <p class="view-desc" style="margin-bottom:14px; max-width:560px;">
-      Itens excluídos ficam aqui por ${LIXEIRA_DIAS} dias antes de sumir de vez — dá pra restaurar
-      se apagou algo por engano.
-    </p>
-    ${lixeira.length === 0 ? `<p class="view-desc" style="margin-bottom:32px;">A lixeira está vazia.</p>` : `
-      <div class="ledger" style="max-width:640px; margin-bottom:32px;">
-        ${lixeira.map(item => `
-          <div class="ledger-row">
-            <div class="ledger-main">
-              <div class="ledger-title">${escapeHtml(descreverItemLixeira(item))}</div>
-              <div class="ledger-sub">Excluído em ${formatDateBR(item.excluidoEm.slice(0, 10))} · some em ${formatDateBR(item.expiraEm.slice(0, 10))}</div>
-            </div>
-            <div class="ledger-actions">
-              <button class="btn btn-ghost btn-sm" data-restaurar-lixeira="${item.id}">Restaurar</button>
-              <button class="btn btn-danger btn-sm" data-excluir-lixeira="${item.id}">Excluir de vez</button>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    `}
-
-    <div class="section-title">Histórico de atividade</div>
-    <p class="view-desc" style="margin-bottom:14px; max-width:560px;">
-      Registro simples das últimas ações feitas na conta — útil se mais de uma pessoa usa o mesmo acesso.
-    </p>
-    ${historico.length === 0 ? `<p class="view-desc" style="margin-bottom:32px;">Ainda não há nada registrado.</p>` : `
-      <div class="ledger" style="max-width:640px; margin-bottom:32px; max-height:340px; overflow-y:auto;">
-        ${historico.slice(0, 50).map(h => `
-          <div class="ledger-row">
-            <div class="ledger-main">
-              <div class="ledger-title">${escapeHtml(h.acao)} ${escapeHtml(h.detalhe)}</div>
-              <div class="ledger-sub">${escapeHtml(h.autor)} · ${formatDateBR(h.quando.slice(0, 10))} às ${h.quando.slice(11, 16)}</div>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    `}
-
     <div class="section-title">Backup dos dados</div>
     <p class="view-desc" style="margin-bottom:14px; max-width:520px;">
       Seus dados já ficam salvos na nuvem (Firebase), então não somem se você trocar
       de aparelho. Ainda assim, é uma boa prática exportar um backup de vez em
-      quando — serve como cópia extra de segurança. O backup inclui tudo: clientes,
-      cobranças, reuniões, serviços, orçamentos, contratos, mensalidades e configurações.
+      quando — serve como cópia extra de segurança.
     </p>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:32px;">
       <button class="btn btn-ghost" id="btnExport">Exportar backup (.json)</button>
@@ -3444,6 +3142,13 @@ function renderConfig() {
 
   const btnVincular = qs('#btnVincular');
   if (btnVincular) btnVincular.onclick = () => vincularConta(qs('#donoUidCampo').value);
+  const btnReconectar = qs('#btnReconectar');
+  if (btnReconectar) btnReconectar.onclick = async () => {
+    const donoUid = await resolveSyncTarget(_meuUid);
+    stopFirestoreSync();
+    startFirestoreSync(donoUid);
+    alert(donoUid === _meuUid ? 'Você não está vinculado(a) a nenhuma conta no momento.' : 'Tentando de novo...');
+  };
   const btnDesvincular = qs('#btnDesvincular');
   if (btnDesvincular) btnDesvincular.onclick = () => desvincularConta();
 
@@ -3478,32 +3183,8 @@ function renderConfig() {
     alert('Salvo.');
   };
 
-  qsa('[data-restaurar-lixeira]').forEach(b => b.onclick = () => {
-    restoreFromTrash(b.dataset.restaurarLixeira);
-    renderConfig();
-  });
-  qsa('[data-excluir-lixeira]').forEach(b => b.onclick = () => {
-    if (confirm('Excluir de vez? Não dá mais pra desfazer isso.')) {
-      excluirDefinitivo(b.dataset.excluirLixeira);
-      renderConfig();
-    }
-  });
-
   qs('#btnExport').onclick = () => {
-    const data = {
-      clients: getClients(),
-      charges: getCharges(),
-      meetings: getMeetings(),
-      servicos: getServicos(),
-      orcamentos: getOrcamentos(),
-      contratos: getContratos(),
-      mensalidades: getMensalidades(),
-      colaboradores: getColaboradores(),
-      lixeira: getLixeira(),
-      historico: getHistorico(),
-      settings: getSettings(),
-      exportedAt: new Date().toISOString()
-    };
+    const data = { clients: getClients(), charges: getCharges(), meetings: getMeetings(), settings: getSettings(), exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -3520,19 +3201,11 @@ function renderConfig() {
     reader.onload = () => {
       try {
         const data = JSON.parse(reader.result);
-        if (!confirm('Importar vai substituir todos os dados atuais desta conta na nuvem. Confirma?')) return;
+        if (!confirm('Importar vai substituir todos os dados atuais deste navegador. Confirma?')) return;
         saveClients(data.clients || []);
         saveCharges(data.charges || []);
         saveMeetings(data.meetings || []);
-        saveServicos(data.servicos || []);
-        saveOrcamentos(data.orcamentos || []);
-        saveContratos(data.contratos || []);
-        saveMensalidades(data.mensalidades || []);
-        saveColaboradores(data.colaboradores || []);
-        _lixeira = data.lixeira || [];
-        _historico = data.historico || [];
         saveSettings(data.settings || {});
-        logHistorico('Importou', 'um arquivo de backup');
         alert('Backup importado com sucesso.');
         refreshBrandBar();
         navigate('dashboard');
@@ -3549,12 +3222,6 @@ function renderConfig() {
         saveClients([]);
         saveCharges([]);
         saveMeetings([]);
-        saveServicos([]);
-        saveOrcamentos([]);
-        saveContratos([]);
-        saveMensalidades([]);
-        _lixeira = [];
-        _historico = [];
         saveSettings({});
         navigate('dashboard');
       }
@@ -3623,9 +3290,4 @@ document.addEventListener('DOMContentLoaded', () => {
       showLockScreen();
     }
   });
-
-  // PWA: deixa o app instalável e funcionando (o básico da tela) sem internet
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Service worker não registrado:', err));
-  }
 });
