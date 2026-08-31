@@ -43,6 +43,14 @@ function daysUntilLabel(d) {
   if (d === 1) return 'Amanhã';
   return `Em ${d} dias`;
 }
+function vencimentoRelativoLabel(vencimentoISO) {
+  const d = daysUntil(vencimentoISO);
+  if (d === 0) return 'vence *hoje*';
+  if (d === 1) return 'vence *amanhã*';
+  if (d > 1) return `vence em *${d} dias*`;
+  const atraso = Math.abs(d);
+  return `venceu há *${atraso} dia${atraso > 1 ? 's' : ''}*`;
+}
 function meetingCountdownLabel(dateISO) {
   return daysUntilLabel(daysUntil(dateISO));
 }
@@ -527,6 +535,7 @@ function navigate(view) {
   const renderers = {
     dashboard: renderDashboard,
     clientes: renderClientes,
+    calculadora: renderCalculadora,
     cobrancas: renderCobrancas,
     agenda: renderAgenda,
     servicos: renderServicos,
@@ -541,6 +550,300 @@ function navigate(view) {
 function refreshBrandBar() {
   const s = getSettings();
   qs('#brandEmpresa').textContent = s.empresaNome ? s.empresaNome : 'seu financeiro';
+}
+
+// Nome usado na saudação da tela inicial — é pessoal (fica salvo no login de
+// cada um, via Firebase Auth), então cada colaborador(a) vê o próprio nome,
+// mesmo estando vinculado(a) aos dados de outra conta.
+function getNomeSaudacao() {
+  if (auth.currentUser && auth.currentUser.displayName) return auth.currentUser.displayName;
+  // Compatibilidade: se ainda não configurou o nome pessoal e é o dono da
+  // própria conta, mantém o comportamento antigo (usava o "Seu nome" das
+  // Configurações, que era compartilhado).
+  if (!_syncTargetUid || _syncTargetUid === _meuUid) {
+    const s = getSettings();
+    if (s.seuNome) return s.seuNome;
+  }
+  return '';
+}
+
+// ---------- CALCULADORA ----------
+let calc = { display: '0', prev: null, operator: null, waitingForOperand: false };
+
+function calcParse(str) {
+  const n = parseFloat(String(str).replace(',', '.'));
+  return isNaN(n) ? 0 : n;
+}
+
+function calcFormatDisplay(str) {
+  if (str === 'Erro') return 'Erro';
+  // enquanto digita, só troca o ponto por vírgula (padrão BR), sem mexer no resto
+  return String(str).replace('.', ',');
+}
+
+function calcCompute(a, b, op) {
+  switch (op) {
+    case '+': return a + b;
+    case '-': return a - b;
+    case '×': return a * b;
+    case '÷': return b === 0 ? NaN : a / b;
+    default: return b;
+  }
+}
+
+function calcRefresh() {
+  const el = qs('#calcDisplay');
+  if (el) el.textContent = calcFormatDisplay(calc.display);
+  const opEl = qs('#calcPendente');
+  if (opEl) {
+    opEl.textContent = (calc.operator && calc.prev != null)
+      ? `${calc.prev.toLocaleString('pt-BR', { maximumFractionDigits: 8 })} ${calc.operator}`
+      : '';
+  }
+}
+
+function calcInputDigit(d) {
+  if (calc.display === 'Erro' || calc.waitingForOperand) {
+    calc.display = d === ',' ? '0,' : d;
+    calc.waitingForOperand = false;
+  } else {
+    calc.display = calc.display === '0' ? d : calc.display + d;
+  }
+  calcRefresh();
+}
+
+function calcInputDot() {
+  if (calc.display === 'Erro' || calc.waitingForOperand) {
+    calc.display = '0.';
+    calc.waitingForOperand = false;
+  } else if (!calc.display.includes('.')) {
+    calc.display += '.';
+  }
+  calcRefresh();
+}
+
+function calcToggleSign() {
+  if (calc.display === 'Erro') return;
+  calc.display = calc.display.startsWith('-') ? calc.display.slice(1) : (calc.display === '0' ? '0' : '-' + calc.display);
+  calcRefresh();
+}
+
+function calcPercent() {
+  if (calc.display === 'Erro') return;
+  const cur = calcParse(calc.display);
+  if (calc.operator && calc.prev != null && (calc.operator === '+' || calc.operator === '-')) {
+    calc.display = String(calc.prev * (cur / 100));
+  } else {
+    calc.display = String(cur / 100);
+  }
+  calc.waitingForOperand = false;
+  calcRefresh();
+}
+
+function calcClear() {
+  calc = { display: '0', prev: null, operator: null, waitingForOperand: false };
+  calcRefresh();
+}
+
+function calcBackspace() {
+  if (calc.display === 'Erro' || calc.waitingForOperand) { calcClear(); return; }
+  calc.display = calc.display.length > 1 ? calc.display.slice(0, -1) : '0';
+  calcRefresh();
+}
+
+function calcInputOperator(op) {
+  if (calc.display === 'Erro') return;
+  const cur = calcParse(calc.display);
+  if (calc.operator && !calc.waitingForOperand) {
+    const result = calcCompute(calc.prev, cur, calc.operator);
+    calc.prev = result;
+    calc.display = isFinite(result) ? String(result) : 'Erro';
+  } else {
+    calc.prev = cur;
+  }
+  calc.operator = op;
+  calc.waitingForOperand = true;
+  calcRefresh();
+}
+
+function calcEquals() {
+  if (calc.operator == null || calc.prev == null) return;
+  const cur = calcParse(calc.display);
+  const result = calcCompute(calc.prev, cur, calc.operator);
+  calc.display = isFinite(result) ? String(result) : 'Erro';
+  calc.prev = null;
+  calc.operator = null;
+  calc.waitingForOperand = true;
+  calcRefresh();
+}
+
+function calcHandleKey(key) {
+  if (/^[0-9]$/.test(key)) return calcInputDigit(key);
+  switch (key) {
+    case ',': case '.': return calcInputDot();
+    case '+': case '-': case '×': case '÷': return calcInputOperator(key);
+    case '=': return calcEquals();
+    case 'C': return calcClear();
+    case '⌫': return calcBackspace();
+    case '%': return calcPercent();
+    case '±': return calcToggleSign();
+  }
+}
+
+function renderCalculadora() {
+  calc = { display: '0', prev: null, operator: null, waitingForOperand: false };
+
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Calculadora</div>
+        <div class="view-desc">Contas rápidas, porcentagem, descontos e parcelas</div>
+      </div>
+    </div>
+
+    <div class="calc-layout">
+      <div class="calc-card">
+        <div class="calc-pendente" id="calcPendente"></div>
+        <div class="calc-display" id="calcDisplay">0</div>
+        <div class="calc-grid">
+          <button class="calc-btn calc-btn-fn" data-calc-key="C">C</button>
+          <button class="calc-btn calc-btn-fn" data-calc-key="±">±</button>
+          <button class="calc-btn calc-btn-fn" data-calc-key="%">%</button>
+          <button class="calc-btn calc-btn-op" data-calc-key="÷">÷</button>
+
+          <button class="calc-btn" data-calc-key="7">7</button>
+          <button class="calc-btn" data-calc-key="8">8</button>
+          <button class="calc-btn" data-calc-key="9">9</button>
+          <button class="calc-btn calc-btn-op" data-calc-key="×">×</button>
+
+          <button class="calc-btn" data-calc-key="4">4</button>
+          <button class="calc-btn" data-calc-key="5">5</button>
+          <button class="calc-btn" data-calc-key="6">6</button>
+          <button class="calc-btn calc-btn-op" data-calc-key="-">−</button>
+
+          <button class="calc-btn" data-calc-key="1">1</button>
+          <button class="calc-btn" data-calc-key="2">2</button>
+          <button class="calc-btn" data-calc-key="3">3</button>
+          <button class="calc-btn calc-btn-op" data-calc-key="+">+</button>
+
+          <button class="calc-btn calc-btn-zero" data-calc-key="0">0</button>
+          <button class="calc-btn" data-calc-key=",">,</button>
+          <button class="calc-btn calc-btn-eq" data-calc-key="=">=</button>
+        </div>
+      </div>
+
+      <div class="quick-calc-col">
+        <div class="section-title" style="font-size:15px;">Ferramentas rápidas</div>
+
+        <div class="quick-calc-card">
+          <div class="quick-calc-title">Porcentagem de um valor</div>
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label">Percentual (%)</label>
+              <input class="input" id="qcPctA" type="number" step="any" placeholder="Ex: 10">
+            </div>
+            <div class="field">
+              <label class="field-label">Valor</label>
+              <input class="input" id="qcPctB" type="number" step="any" placeholder="Ex: 500">
+            </div>
+          </div>
+          <div class="quick-calc-result" id="qcPctResultado">Resultado: —</div>
+        </div>
+
+        <div class="quick-calc-card">
+          <div class="quick-calc-title">Acréscimo ou desconto</div>
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label">Valor base</label>
+              <input class="input" id="qcAdBase" type="number" step="any" placeholder="Ex: 1000">
+            </div>
+            <div class="field">
+              <label class="field-label">Percentual (%)</label>
+              <input class="input" id="qcAdPct" type="number" step="any" placeholder="Ex: 15">
+            </div>
+            <div class="field">
+              <label class="field-label">Tipo</label>
+              <select class="input" id="qcAdTipo">
+                <option value="acrescimo">Acréscimo (+)</option>
+                <option value="desconto">Desconto (−)</option>
+              </select>
+            </div>
+          </div>
+          <div class="quick-calc-result" id="qcAdResultado">Resultado: —</div>
+        </div>
+
+        <div class="quick-calc-card">
+          <div class="quick-calc-title">Qual % um valor representa</div>
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label">Parte</label>
+              <input class="input" id="qcRepParte" type="number" step="any" placeholder="Ex: 150">
+            </div>
+            <div class="field">
+              <label class="field-label">Total</label>
+              <input class="input" id="qcRepTotal" type="number" step="any" placeholder="Ex: 1000">
+            </div>
+          </div>
+          <div class="quick-calc-result" id="qcRepResultado">Resultado: —</div>
+        </div>
+
+        <div class="quick-calc-card">
+          <div class="quick-calc-title">Dividir em parcelas</div>
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label">Valor total</label>
+              <input class="input" id="qcParTotal" type="number" step="any" placeholder="Ex: 1200">
+            </div>
+            <div class="field">
+              <label class="field-label">Nº de parcelas</label>
+              <input class="input" id="qcParN" type="number" step="1" min="1" placeholder="Ex: 12">
+            </div>
+          </div>
+          <div class="quick-calc-result" id="qcParResultado">Resultado: —</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  qsa('[data-calc-key]').forEach(b => b.addEventListener('click', () => calcHandleKey(b.dataset.calcKey)));
+  calcRefresh();
+
+  const qcOn = (ids, fn) => ids.forEach(id => qs('#' + id).addEventListener('input', fn));
+
+  qcOn(['qcPctA', 'qcPctB'], () => {
+    const pct = parseFloat(qs('#qcPctA').value);
+    const base = parseFloat(qs('#qcPctB').value);
+    const out = qs('#qcPctResultado');
+    if (isNaN(pct) || isNaN(base)) { out.textContent = 'Resultado: —'; return; }
+    out.textContent = `Resultado: ${pct}% de ${formatCurrency(base)} = ${formatCurrency(base * pct / 100)}`;
+  });
+
+  qcOn(['qcAdBase', 'qcAdPct', 'qcAdTipo'], () => {
+    const base = parseFloat(qs('#qcAdBase').value);
+    const pct = parseFloat(qs('#qcAdPct').value);
+    const tipo = qs('#qcAdTipo').value;
+    const out = qs('#qcAdResultado');
+    if (isNaN(base) || isNaN(pct)) { out.textContent = 'Resultado: —'; return; }
+    const diferenca = base * pct / 100;
+    const final = tipo === 'acrescimo' ? base + diferenca : base - diferenca;
+    out.textContent = `Resultado: ${formatCurrency(base)} ${tipo === 'acrescimo' ? '+' : '−'} ${pct}% (${formatCurrency(diferenca)}) = ${formatCurrency(final)}`;
+  });
+
+  qcOn(['qcRepParte', 'qcRepTotal'], () => {
+    const parte = parseFloat(qs('#qcRepParte').value);
+    const total = parseFloat(qs('#qcRepTotal').value);
+    const out = qs('#qcRepResultado');
+    if (isNaN(parte) || isNaN(total) || total === 0) { out.textContent = 'Resultado: —'; return; }
+    out.textContent = `Resultado: ${formatCurrency(parte)} é ${(parte / total * 100).toLocaleString('pt-BR', { maximumFractionDigits: 2 })}% de ${formatCurrency(total)}`;
+  });
+
+  qcOn(['qcParTotal', 'qcParN'], () => {
+    const total = parseFloat(qs('#qcParTotal').value);
+    const n = parseInt(qs('#qcParN').value, 10);
+    const out = qs('#qcParResultado');
+    if (isNaN(total) || !n || n < 1) { out.textContent = 'Resultado: —'; return; }
+    out.textContent = `Resultado: ${n}x de ${formatCurrency(total / n)}`;
+  });
 }
 
 // ---------- DASHBOARD ----------
@@ -573,7 +876,7 @@ function renderDashboard() {
     .map(c => ({ c, info: aniversarioContrato(c.clienteDesde) }))
     .filter(x => x.info && x.info.dias === 0);
 
-  const nomeUsuario = settings.seuNome ? `, ${escapeHtml(settings.seuNome)}` : '';
+  const nomeUsuario = getNomeSaudacao() ? `, ${escapeHtml(getNomeSaudacao())}` : '';
   const proximaReuniao = proximasReunioes[0] || null;
 
   qs('#main').innerHTML = `
@@ -1186,7 +1489,7 @@ function renderChargeLedger(charges, opts = {}) {
         <div class="ledger-row">
           <div class="ledger-main">
             <div class="ledger-title">${escapeHtml(nomeExibicao)}${!client && c.avulsoNome ? ' <span class="avulso-tag">avulsa</span>' : ''}</div>
-            <div class="ledger-sub">${escapeHtml(c.descricao)} · vence ${formatDateBR(c.vencimento)}</div>
+            <div class="ledger-sub">${escapeHtml(c.descricao)} · vence ${formatDateBR(c.vencimento)}${status === 'pago' && c.formaPagamentoUsada ? ' · pago via ' + formaPagamentoLabel(c.formaPagamentoUsada) : ''}</div>
           </div>
           <span class="stamp-badge ${stampClass}">${stampLabel}</span>
           <div class="ledger-value">${formatCurrency(c.valor)}</div>
@@ -1217,16 +1520,55 @@ function bindChargeActions() {
   });
 }
 
+function formaPagamentoLabel(valor) {
+  const labels = {
+    pix: 'PIX', PIX: 'PIX',
+    cartao_credito: 'Cartão de crédito',
+    cartao_debito: 'Cartão de débito',
+    boleto: 'Boleto bancário',
+    dinheiro: 'Dinheiro',
+    transferencia: 'Transferência bancária',
+    outro: 'Outro'
+  };
+  return labels[valor] || valor || '';
+}
+
 function openMarkPaidModal(chargeId) {
+  const charge = getCharges().find(c => c.id === chargeId);
+  const aceitas = (charge && charge.formasPagamento) || [];
+  // Sugere primeiro a(s) forma(s) que foram marcadas como aceitas nessa
+  // cobrança, mas sempre deixa trocar — o cliente pode ter pago diferente
+  // do combinado.
+  const opcoes = [
+    { valor: 'pix', label: 'PIX' },
+    { valor: 'cartao_credito', label: 'Cartão de crédito' },
+    { valor: 'cartao_debito', label: 'Cartão de débito' },
+    { valor: 'boleto', label: 'Boleto bancário' },
+    { valor: 'dinheiro', label: 'Dinheiro' },
+    { valor: 'transferencia', label: 'Transferência bancária' },
+    { valor: 'outro', label: 'Outro' }
+  ];
+  const sugerida = aceitas.includes('pix') ? 'pix'
+    : aceitas.includes('cartao') ? 'cartao_credito'
+    : aceitas.includes('boleto') ? 'boleto'
+    : aceitas.includes('dinheiro') ? 'dinheiro'
+    : 'pix';
+
   openModal(`
     <div class="modal-title">Marcar como pago</div>
+    <div class="field">
+      <label class="field-label">Forma de pagamento usada</label>
+      <select class="input" id="mpForma">
+        ${opcoes.map(o => `<option value="${o.valor}" ${o.valor === sugerida ? 'selected' : ''}>${o.label}</option>`).join('')}
+      </select>
+    </div>
     <div class="field">
       <label class="field-label">Data do pagamento</label>
       <input class="input" type="date" id="mpData" value="${todayISO()}">
     </div>
     <div class="field">
       <label class="field-label">Link do comprovante (opcional)</label>
-      <input class="input" type="url" id="mpComprovante" placeholder="Ex: print do PIX no Google Drive/Fotos">
+      <input class="input" type="url" id="mpComprovante" placeholder="Ex: print do comprovante no Google Drive/Fotos">
     </div>
     <div class="modal-actions">
       <button type="button" class="btn btn-ghost" id="btnCancelPago">Cancelar</button>
@@ -1242,6 +1584,7 @@ function openMarkPaidModal(chargeId) {
     charges[idx].status = 'pago';
     charges[idx].dataPagamento = qs('#mpData').value || todayISO();
     charges[idx].comprovanteLink = link || null;
+    charges[idx].formaPagamentoUsada = qs('#mpForma').value;
     saveCharges(charges);
     closeModal();
     navigate(currentView);
@@ -1306,7 +1649,14 @@ async function gerarReciboPDF(chargeId) {
   linha('REFERENTE A', charge.descricao);
   linha('VALOR', formatCurrency(charge.valor), 16);
   linha('DATA DO PAGAMENTO', formatDateBR(charge.dataPagamento || todayISO()));
-  if (settings.pix) linha('CHAVE PIX', settings.pix);
+  if (charge.formaPagamentoUsada) {
+    linha('FORMA DE PAGAMENTO', formaPagamentoLabel(charge.formaPagamentoUsada));
+    if (charge.formaPagamentoUsada === 'pix' && settings.pix) linha('CHAVE PIX', settings.pix);
+  } else if (settings.pix) {
+    // Compatibilidade: recibos de cobranças antigas, marcadas como pagas
+    // antes de existir o campo "forma de pagamento usada".
+    linha('CHAVE PIX', settings.pix);
+  }
 
   page.drawLine({ start: { x: 40, y: y - 4 }, end: { x: 380, y: y - 4 }, thickness: 0.5, color: softColor });
   y -= 24;
@@ -1374,6 +1724,47 @@ function openChargeModal(presets, onSaved) {
           <input class="input" id="chVencimento" type="date" required value="${todayISO()}">
         </div>
       </div>
+
+      <div class="field">
+        <label class="field-label">Formas de pagamento aceitas nesta cobrança</label>
+        <div class="payment-check-group">
+          <label class="service-check" style="border-bottom:none; padding:8px 10px;">
+            <input type="checkbox" id="chPagPix" ${getSettings().pix ? 'checked' : ''}>
+            <span>Pix ${getSettings().pix ? '' : '<span class="quick-calc-result" style="color:var(--ink-soft); display:inline;">(cadastre sua chave em Configurações)</span>'}</span>
+          </label>
+          <label class="service-check" style="border-bottom:none; padding:8px 10px;">
+            <input type="checkbox" id="chPagCartao">
+            <span>Cartão de crédito/débito</span>
+          </label>
+          <label class="service-check" style="border-bottom:none; padding:8px 10px;">
+            <input type="checkbox" id="chPagBoleto">
+            <span>Boleto</span>
+          </label>
+          <label class="service-check" style="border-bottom:none; padding:8px 10px;">
+            <input type="checkbox" id="chPagDinheiro">
+            <span>Dinheiro</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="field-row hidden" id="chCartaoLinkRow">
+        <div class="field">
+          <label class="field-label">Link de pagamento (cartão) — opcional</label>
+          <input class="input" id="chCartaoLink" type="url" placeholder="Ex: link do Mercado Pago, PagSeguro, Stripe...">
+        </div>
+      </div>
+
+      <div class="field-row hidden" id="chBoletoFieldsRow">
+        <div class="field">
+          <label class="field-label">Link do boleto — opcional</label>
+          <input class="input" id="chBoletoLink" type="url" placeholder="Link pra abrir/baixar o boleto">
+        </div>
+        <div class="field">
+          <label class="field-label">Código de barras / linha digitável — opcional</label>
+          <input class="input" id="chBoletoCodigo" placeholder="Cole aqui a linha digitável">
+        </div>
+      </div>
+
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="btnCancelCharge">Cancelar</button>
         <button type="submit" class="btn btn-primary">Lançar cobrança</button>
@@ -1411,6 +1802,14 @@ function openChargeModal(presets, onSaved) {
   }
 
   qs('#btnCancelCharge').onclick = closeModal;
+
+  qs('#chPagCartao').onchange = () => {
+    qs('#chCartaoLinkRow').classList.toggle('hidden', !qs('#chPagCartao').checked);
+  };
+  qs('#chPagBoleto').onchange = () => {
+    qs('#chBoletoFieldsRow').classList.toggle('hidden', !qs('#chPagBoleto').checked);
+  };
+
   qs('#chargeForm').onsubmit = (e) => {
     e.preventDefault();
     const tipo = temClientes ? qs('#chTipo').value : 'avulso';
@@ -1425,6 +1824,19 @@ function openChargeModal(presets, onSaved) {
       if (!clientId) { alert('Selecione um cliente.'); return; }
       extra = { clientId, avulsoNome: null, avulsoTelefone: null };
     }
+
+    const formasPagamento = [];
+    if (qs('#chPagPix').checked) formasPagamento.push('pix');
+    if (qs('#chPagCartao').checked) formasPagamento.push('cartao');
+    if (qs('#chPagBoleto').checked) formasPagamento.push('boleto');
+    if (qs('#chPagDinheiro').checked) formasPagamento.push('dinheiro');
+
+    let cartaoLink = qs('#chCartaoLink').value.trim();
+    if (cartaoLink && !/^https?:\/\//i.test(cartaoLink)) cartaoLink = 'https://' + cartaoLink;
+    let boletoLink = qs('#chBoletoLink').value.trim();
+    if (boletoLink && !/^https?:\/\//i.test(boletoLink)) boletoLink = 'https://' + boletoLink;
+    const boletoCodigo = qs('#chBoletoCodigo').value.trim();
+
     const charges = getCharges();
     charges.push({
       id: uid(),
@@ -1434,7 +1846,11 @@ function openChargeModal(presets, onSaved) {
       vencimento: qs('#chVencimento').value,
       status: 'pendente',
       dataPagamento: null,
-      createdAt: todayISO()
+      createdAt: todayISO(),
+      formasPagamento,
+      linkPagamentoCartao: cartaoLink || null,
+      boletoLink: boletoLink || null,
+      boletoCodigo: boletoCodigo || null
     });
     saveCharges(charges);
     closeModal();
@@ -1594,18 +2010,66 @@ function openMeetingModal(meetingId, presetClientId, onSaved) {
 
 // ---------- ENVIO WHATSAPP ----------
 // obs: WhatsApp usa *asterisco* pra deixar o texto em negrito
+const MODELO_COBRANCA_PADRAO =
+`Oi, {nome}! {quem_fala}
+
+Passando pra lembrar da cobrança de *{descricao}* 🧾
+💰 Valor: {valor}
+📅 {vencimento_relativo} ({vencimento_data})
+{atraso}{pagamento}
+
+Qualquer dúvida, é só chamar por aqui! 🙏`;
+
+function renderTemplate(template, vars) {
+  return String(template || '').replace(/\{(\w+)\}/g, (m, key) => (vars[key] != null ? vars[key] : ''));
+}
+
+function buildLinhasPagamento(charge, settings) {
+  // Compatibilidade: cobranças criadas antes dessa opção existir não têm
+  // "formasPagamento" salvo — nesse caso, mantém o comportamento de sempre
+  // mostrar a chave PIX (se configurada), igual funcionava antes.
+  const formas = charge.formasPagamento || (settings.pix ? ['pix'] : []);
+  let linhas = '';
+  if (formas.includes('pix') && settings.pix) {
+    linhas += `\n💳 Chave PIX: *${settings.pix}*`;
+  }
+  if (formas.includes('cartao')) {
+    linhas += charge.linkPagamentoCartao
+      ? `\n💳 Link para pagar no cartão (crédito/débito): ${charge.linkPagamentoCartao}`
+      : `\n💳 Também aceito cartão de crédito/débito.`;
+  }
+  if (formas.includes('boleto')) {
+    if (charge.boletoLink) linhas += `\n🧾 Boleto: ${charge.boletoLink}`;
+    if (charge.boletoCodigo) linhas += `\n🔢 Código de barras: *${charge.boletoCodigo}*`;
+    if (!charge.boletoLink && !charge.boletoCodigo) linhas += `\n🧾 Também aceito boleto (te mando os dados à parte).`;
+  }
+  if (formas.includes('dinheiro')) {
+    linhas += `\n💵 Também aceito em dinheiro.`;
+  }
+  return linhas;
+}
+
+function montarVariaveisMensagemCobranca(charge, client, settings) {
+  const quemFala = settings.seuNome ? `Aqui quem fala é *${settings.seuNome}*.` : '';
+  const status = chargeStatus(charge);
+  const atraso = status === 'atrasado' ? '\n⚠️ Essa cobrança já está atrasada — quando conseguir, dá uma olhada aí!' : '';
+  const pagamento = buildLinhasPagamento(charge, settings);
+  return {
+    nome: client.nome,
+    quem_fala: quemFala,
+    descricao: charge.descricao,
+    valor: `*${formatCurrency(charge.valor)}*`,
+    vencimento_data: formatDateBR(charge.vencimento),
+    vencimento_relativo: vencimentoRelativoLabel(charge.vencimento),
+    atraso,
+    pagamento
+  };
+}
+
 function buildMessage(charge, client) {
   const settings = getSettings();
-  const quemFala = settings.seuNome ? settings.seuNome : '';
-  const status = chargeStatus(charge);
-  const linhaAtraso = status === 'atrasado' ? `\n⚠️ Essa cobrança está em atraso desde *${formatDateBR(charge.vencimento)}*.` : '';
-  const linhaPix = settings.pix ? `\n💳 Chave PIX: *${settings.pix}*` : '';
-  return `👋 Olá, *${client.nome}*! ${quemFala ? 'Aqui quem fala é *' + quemFala + '*.' : ''}` +
-    `\n\n🧾 Segue sua cobrança referente a: *${charge.descricao}*` +
-    `\n💰 Valor: *${formatCurrency(charge.valor)}*` +
-    `\n📅 Vencimento: *${formatDateBR(charge.vencimento)}*` +
-    `${linhaAtraso}${linhaPix}` +
-    `\n\n🙏 Qualquer dúvida, é só chamar por aqui. Obrigado!`;
+  const template = settings.modeloCobranca || MODELO_COBRANCA_PADRAO;
+  return renderTemplate(template, montarVariaveisMensagemCobranca(charge, client, settings));
 }
 
 function openWhatsappModal(chargeId) {
@@ -2970,6 +3434,18 @@ function renderConfig() {
     </p>
     <div class="field-row" style="align-items:flex-end; max-width:520px; margin-bottom:8px;">
       <div class="field" style="margin-bottom:0;">
+        <label class="field-label">Seu nome (só aparece pra você, na saudação)</label>
+        <input class="input" id="meuNomeExibicao" placeholder="Ex: Ana" value="${escapeHtml((auth.currentUser && auth.currentUser.displayName) || '')}">
+      </div>
+      <button class="btn btn-ghost" id="btnSalvarMeuNome" style="margin-bottom:0;">Salvar</button>
+    </div>
+    <p class="view-desc" style="margin-bottom:16px;">
+      Esse nome é pessoal: cada pessoa (dono ou colaborador) que entra com seu
+      próprio e-mail vê o próprio nome na tela inicial, mesmo compartilhando os
+      mesmos dados.
+    </p>
+    <div class="field-row" style="align-items:flex-end; max-width:520px; margin-bottom:8px;">
+      <div class="field" style="margin-bottom:0;">
         <label class="field-label">Seu ID de usuário (UID)</label>
         <input class="input" id="meuUidCampo" readonly value="${escapeHtml(_meuUid || '')}">
       </div>
@@ -3051,6 +3527,27 @@ function renderConfig() {
       <button type="submit" class="btn btn-primary">Salvar</button>
     </form>
 
+    <div class="section-title">Mensagem de cobrança (WhatsApp)</div>
+    <p class="view-desc" style="margin-bottom:12px;">
+      Personalize o texto que é montado ao enviar uma cobrança — pra soar do
+      seu jeito, e não igual em toda cobrança. Use as variáveis abaixo, elas
+      são preenchidas automaticamente:
+    </p>
+    <p class="view-desc" style="margin-bottom:14px; font-family:var(--font-mono); font-size:12px;">
+      {nome} {quem_fala} {descricao} {valor} {vencimento_data} {vencimento_relativo} {atraso} {pagamento}
+    </p>
+    <form id="modeloCobrancaForm" style="max-width:520px; margin-bottom:12px;">
+      <div class="field">
+        <textarea class="input" id="sModeloCobranca" style="min-height:190px; font-size:13px;">${escapeHtml(s.modeloCobranca || MODELO_COBRANCA_PADRAO)}</textarea>
+      </div>
+      <div style="display:flex; gap:10px; margin-bottom:16px;">
+        <button type="submit" class="btn btn-primary">Salvar modelo</button>
+        <button type="button" class="btn btn-ghost" id="btnRestaurarModelo">Restaurar padrão</button>
+      </div>
+    </form>
+    <div class="field-label" style="margin-bottom:6px;">Pré-visualização (com dados de exemplo)</div>
+    <div class="wa-preview" id="previewModeloCobranca" style="max-width:520px; margin-bottom:32px;"></div>
+
     <div class="section-title">Seus dados no contrato</div>
     <p class="view-desc" style="margin-bottom:14px;">Usados como CONTRATADO ao gerar contratos. Já vêm com os dados do seu modelo — mude só se algo tiver mudado.</p>
     <form id="contratadoForm" style="max-width:420px; margin-bottom:32px;">
@@ -3123,6 +3620,18 @@ function renderConfig() {
     }).catch(() => alert('Não consegui copiar sozinho — seleciona o texto e copia manualmente (Ctrl+C).'));
   };
 
+  const btnSalvarMeuNome = qs('#btnSalvarMeuNome');
+  if (btnSalvarMeuNome) btnSalvarMeuNome.onclick = async () => {
+    const novoNome = qs('#meuNomeExibicao').value.trim();
+    try {
+      await auth.currentUser.updateProfile({ displayName: novoNome });
+      btnSalvarMeuNome.textContent = 'Salvo!';
+      setTimeout(() => { btnSalvarMeuNome.textContent = 'Salvar'; }, 1500);
+    } catch (err) {
+      alert('Não consegui salvar seu nome agora. Confira sua internet e tente de novo.');
+    }
+  };
+
   const btnAddColaborador = qs('#btnAddColaborador');
   if (btnAddColaborador) btnAddColaborador.onclick = () => {
     const uid = qs('#colabUidNovo').value.trim();
@@ -3162,7 +3671,36 @@ function renderConfig() {
       valorDescontoIndicacao: qs('#sDescontoIndicacao').value === '' ? null : Number(qs('#sDescontoIndicacao').value)
     });
     refreshBrandBar();
+    atualizarPreviewModeloCobranca();
     alert('Salvo.');
+  };
+
+  function atualizarPreviewModeloCobranca() {
+    const template = qs('#sModeloCobranca').value;
+    const settings = getSettings();
+    const chargeExemplo = {
+      descricao: 'Mensalidade de agosto',
+      valor: 150,
+      vencimento: todayISO(),
+      status: 'pendente',
+      formasPagamento: settings.pix ? ['pix'] : ['pix', 'cartao', 'dinheiro']
+    };
+    const clienteExemplo = { nome: 'Maria' };
+    const vars = montarVariaveisMensagemCobranca(chargeExemplo, clienteExemplo, settings);
+    qs('#previewModeloCobranca').textContent = renderTemplate(template, vars);
+  }
+  atualizarPreviewModeloCobranca();
+  qs('#sModeloCobranca').addEventListener('input', atualizarPreviewModeloCobranca);
+
+  qs('#btnRestaurarModelo').onclick = () => {
+    qs('#sModeloCobranca').value = MODELO_COBRANCA_PADRAO;
+    atualizarPreviewModeloCobranca();
+  };
+
+  qs('#modeloCobrancaForm').onsubmit = (e) => {
+    e.preventDefault();
+    saveSettings({ ...getSettings(), modeloCobranca: qs('#sModeloCobranca').value });
+    alert('Modelo salvo.');
   };
 
   qs('#contratadoForm').onsubmit = (e) => {
