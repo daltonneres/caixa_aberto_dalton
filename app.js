@@ -242,6 +242,7 @@ let _orcamentos = [];
 let _contratos = [];
 let _mensalidades = [];
 let _colaboradores = [];
+let _negociacoes = [];
 let _settings = {};
 let _docRef = null;
 let _unsubscribeSnapshot = null;
@@ -257,6 +258,7 @@ function getOrcamentos() { return _orcamentos; }
 function getContratos() { return _contratos; }
 function getMensalidades() { return _mensalidades; }
 function getColaboradores() { return _colaboradores; }
+function getNegociacoes() { return _negociacoes; }
 function getSettings() { return _settings; }
 
 function saveClients(list) { _clients = list; queuePersist(); }
@@ -267,6 +269,7 @@ function saveOrcamentos(list) { _orcamentos = list; queuePersist(); }
 function saveContratos(list) { _contratos = list; queuePersist(); }
 function saveMensalidades(list) { _mensalidades = list; queuePersist(); }
 function saveColaboradores(list) { _colaboradores = list; queuePersist(); }
+function saveNegociacoes(list) { _negociacoes = list; queuePersist(); }
 function saveSettings(s) { _settings = s; queuePersist(); }
 
 function clientById(id) { return getClients().find(c => c.id === id); }
@@ -293,6 +296,7 @@ function queuePersist() {
       mensalidades: _mensalidades,
       colaboradores: _colaboradores.map(c => c.uid),
       colaboradoresInfo: _colaboradores,
+      negociacoes: _negociacoes,
       settings: _settings,
       updatedAt: new Date().toISOString()
     }, { merge: true }).catch(err => {
@@ -334,6 +338,7 @@ function startFirestoreSync(donoUid) {
     _contratos = data.contratos || [];
     _mensalidades = data.mensalidades || [];
     _colaboradores = data.colaboradoresInfo || (data.colaboradores || []).map(uid => ({ uid, apelido: '' }));
+    _negociacoes = data.negociacoes || [];
     _settings = data.settings || {};
     if (_settings.tema) {
       localStorage.setItem('ca_tema', _settings.tema);
@@ -409,7 +414,7 @@ function stopFirestoreSync() {
   if (_unsubscribeSnapshot) _unsubscribeSnapshot();
   _unsubscribeSnapshot = null;
   _docRef = null;
-  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _settings = {};
+  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _negociacoes = []; _settings = {};
 }
 
 // ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
@@ -540,6 +545,7 @@ function navigate(view) {
     agenda: renderAgenda,
     servicos: renderServicos,
     mensalidades: renderMensalidades,
+    negociacoes: renderNegociacoes,
     relatorios: renderRelatorios,
     contratos: renderContratos,
     config: renderConfig
@@ -2852,6 +2858,218 @@ function openMensalidadeModal(id) {
     saveMensalidades(mensalidades);
     closeModal();
     renderMensalidades();
+  };
+}
+
+// ---------- NEGOCIAÇÕES (parcerias com colaboradora(s)) ----------
+// Aqui você registra, por projeto/cliente, o valor de contratação (pago
+// uma vez), a mensalidade (recorrente) e o percentual que a pessoa que te
+// ajuda recebe. O valor a receber dela é calculado automaticamente sobre
+// cada um dos dois — contratação é comissão única, mensalidade é todo mês.
+function comissaoContratacao(n) { return (Number(n.valorContratacao) || 0) * (Number(n.percentual) || 0) / 100; }
+function comissaoMensal(n) { return (Number(n.valorMensalidade) || 0) * (Number(n.percentual) || 0) / 100; }
+function mesAtualISO() { return todayISO().slice(0, 7); }
+function mesAnoLabel(isoMonth) {
+  const [y, m] = isoMonth.split('-');
+  const label = new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' }).format(new Date(Number(y), Number(m) - 1, 1));
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+// a mensalidade "renova" sozinha todo dia 01: comparamos o mês salvo em
+// mensalidadePagaMes com o mês atual — se não bater, volta a pendente.
+function mensalidadeEstaPagaEsteMes(n) { return n.mensalidadePagaMes === mesAtualISO(); }
+
+function renderNegociacoes() {
+  const negociacoes = getNegociacoes();
+  const clients = getClients();
+
+  if (clients.length === 0) {
+    qs('#main').innerHTML = `
+      <div class="view-header">
+        <div>
+          <div class="view-title">Negociações</div>
+          <div class="view-desc">Projetos em parceria — cliente, contratação, mensalidade e quanto cada colaboradora recebe</div>
+        </div>
+      </div>
+      ${emptyState('Cadastre um cliente primeiro', 'Pra registrar uma negociação você escolhe o cliente na lista de Clientes. Cadastre ao menos um pra começar.')}
+    `;
+    return;
+  }
+
+  const totalMensal = negociacoes.reduce((sum, n) => sum + comissaoMensal(n), 0);
+  const totalContratacaoAberta = negociacoes.filter(n => !n.contratacaoPaga).reduce((sum, n) => sum + comissaoContratacao(n), 0);
+  const totalMensalidadePendente = negociacoes.filter(n => Number(n.valorMensalidade) > 0 && !mensalidadeEstaPagaEsteMes(n)).reduce((sum, n) => sum + comissaoMensal(n), 0);
+  const colaboradorasAtivas = new Set(negociacoes.map(n => n.colaboradora.trim().toLowerCase())).size;
+
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Negociações</div>
+        <div class="view-desc">Projetos em parceria — cliente, contratação, mensalidade e quanto cada colaboradora recebe</div>
+      </div>
+      <button class="btn btn-primary" id="btnNovaNegociacao">+ Nova negociação</button>
+    </div>
+
+    ${negociacoes.length > 0 ? `
+      <div class="cards-grid">
+        <div class="stat-card">
+          <div class="stat-label">Comissão recorrente / mês</div>
+          <div class="stat-value">${formatCurrency(totalMensal)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Mensalidades pendentes (${mesAnoLabel(mesAtualISO())})</div>
+          <div class="stat-value brick">${formatCurrency(totalMensalidadePendente)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Comissão de contratação em aberto</div>
+          <div class="stat-value brick">${formatCurrency(totalContratacaoAberta)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Colaboradoras com projetos</div>
+          <div class="stat-value">${colaboradorasAtivas}</div>
+        </div>
+      </div>
+    ` : ''}
+
+    ${negociacoes.length === 0 ? emptyState('Nenhuma negociação registrada', 'Registre um projeto em parceria: escolha o cliente, o valor de contratação, a mensalidade e o percentual que a colaboradora recebe.') : `
+      <div class="ledger">
+        ${negociacoes.map(n => {
+          const cliente = clientById(n.clienteId);
+          const cComissao = comissaoContratacao(n);
+          const mComissao = comissaoMensal(n);
+          const mensalidadePaga = mensalidadeEstaPagaEsteMes(n);
+          return `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(cliente ? cliente.nome : 'Cliente removido')}</div>
+              <div class="ledger-sub">${escapeHtml(n.colaboradora)} · ${Number(n.percentual) || 0}% de comissão</div>
+              <div class="ledger-sub" style="margin-top:4px;">
+                Contratação: ${formatCurrency(n.valorContratacao)} → comissão ${formatCurrency(cComissao)} (uma vez)
+                ${n.contratacaoPaga ? '<span class="stamp-badge stamp-pago" style="margin-left:6px;">paga</span>' : (Number(n.valorContratacao) > 0 ? '<span class="stamp-badge stamp-pendente" style="margin-left:6px;">pendente</span>' : '')}
+              </div>
+              <div class="ledger-sub">
+                Mensalidade: ${formatCurrency(n.valorMensalidade)}/mês → comissão ${formatCurrency(mComissao)}/mês
+                ${Number(n.valorMensalidade) > 0 ? `<span class="stamp-badge ${mensalidadePaga ? 'stamp-pago' : 'stamp-pendente'}" style="margin-left:6px;">${mensalidadePaga ? mesAnoLabel(mesAtualISO()) + ' paga' : mesAnoLabel(mesAtualISO()) + ' pendente'}</span>` : ''}
+              </div>
+              ${n.observacoes ? `<div class="ledger-sub" style="margin-top:4px;">${escapeHtml(n.observacoes)}</div>` : ''}
+            </div>
+            <div class="ledger-actions">
+              ${Number(n.valorContratacao) > 0 ? `<button class="btn btn-ghost btn-sm" data-toggle-paga-negociacao="${n.id}">${n.contratacaoPaga ? 'Contratação: marcar pendente' : 'Contratação: marcar paga'}</button>` : ''}
+              ${Number(n.valorMensalidade) > 0 ? `<button class="btn btn-ghost btn-sm" data-toggle-mensalidade-negociacao="${n.id}">${mensalidadePaga ? 'Mensalidade: desmarcar' : 'Mensalidade: marcar paga (' + mesAnoLabel(mesAtualISO()) + ')'}</button>` : ''}
+              <button class="btn btn-ghost btn-sm" data-edit-negociacao="${n.id}">Editar</button>
+              <button class="btn btn-danger btn-sm" data-del-negociacao="${n.id}">Excluir</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    `}
+  `;
+
+  qs('#btnNovaNegociacao').onclick = () => openNegociacaoModal();
+  qsa('[data-edit-negociacao]').forEach(b => b.onclick = () => openNegociacaoModal(b.dataset.editNegociacao));
+  qsa('[data-toggle-paga-negociacao]').forEach(b => b.onclick = () => {
+    const list = getNegociacoes();
+    const idx = list.findIndex(n => n.id === b.dataset.togglePagaNegociacao);
+    if (idx === -1) return;
+    list[idx] = { ...list[idx], contratacaoPaga: !list[idx].contratacaoPaga };
+    saveNegociacoes(list);
+    renderNegociacoes();
+  });
+  qsa('[data-toggle-mensalidade-negociacao]').forEach(b => b.onclick = () => {
+    const list = getNegociacoes();
+    const idx = list.findIndex(n => n.id === b.dataset.toggleMensalidadeNegociacao);
+    if (idx === -1) return;
+    const jaPaga = mensalidadeEstaPagaEsteMes(list[idx]);
+    list[idx] = { ...list[idx], mensalidadePagaMes: jaPaga ? null : mesAtualISO() };
+    saveNegociacoes(list);
+    renderNegociacoes();
+  });
+  qsa('[data-del-negociacao]').forEach(b => b.onclick = () => {
+    if (confirm('Excluir esta negociação? Isso não mexe em nada já cadastrado no cliente, só remove o registro da parceria.')) {
+      saveNegociacoes(getNegociacoes().filter(n => n.id !== b.dataset.delNegociacao));
+      renderNegociacoes();
+    }
+  });
+}
+
+function openNegociacaoModal(id) {
+  const editing = id ? getNegociacoes().find(n => n.id === id) : null;
+  const clients = getClients();
+  const colaboradorasConhecidas = Array.from(new Set(getNegociacoes().map(n => n.colaboradora).filter(Boolean)));
+
+  openModal(`
+    <div class="modal-title">${editing ? 'Editar negociação' : 'Nova negociação'}</div>
+    <form id="negociacaoForm">
+      <div class="field">
+        <label class="field-label">Cliente</label>
+        <select class="input" id="ngCliente" required>
+          ${clients.map(c => `<option value="${c.id}" ${editing && editing.clienteId === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label">Colaboradora</label>
+        <input class="input" id="ngColaboradora" list="ngColaboradorasList" required placeholder="Nome de quem vai receber a comissão" value="${editing ? escapeHtml(editing.colaboradora) : ''}">
+        <datalist id="ngColaboradorasList">
+          ${colaboradorasConhecidas.map(nome => `<option value="${escapeHtml(nome)}">`).join('')}
+        </datalist>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Valor de contratação (R$)</label>
+          <input class="input" type="number" min="0" step="0.01" id="ngContratacao" value="${editing ? editing.valorContratacao : ''}" placeholder="Pago uma vez só">
+        </div>
+        <div class="field">
+          <label class="field-label">Mensalidade (R$)</label>
+          <input class="input" type="number" min="0" step="0.01" id="ngMensalidade" value="${editing ? editing.valorMensalidade : ''}" placeholder="Cobrado todo mês">
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Percentual da colaboradora (%)</label>
+        <input class="input" type="number" min="0" max="100" step="0.1" id="ngPercentual" required value="${editing ? editing.percentual : ''}">
+      </div>
+      <div class="field" id="ngPreview" style="font-size:13px; color:var(--ink-soft);"></div>
+      <div class="field">
+        <label class="field-label">Observações (opcional)</label>
+        <textarea class="input" id="ngObservacoes" style="min-height:60px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.observacoes || '') : ''}</textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnCancelNegociacao">Cancelar</button>
+        <button type="submit" class="btn btn-primary">${editing ? 'Salvar' : 'Adicionar'}</button>
+      </div>
+    </form>
+  `);
+
+  const atualizarPreview = () => {
+    const contratacao = Number(qs('#ngContratacao').value) || 0;
+    const mensalidade = Number(qs('#ngMensalidade').value) || 0;
+    const percentual = Number(qs('#ngPercentual').value) || 0;
+    qs('#ngPreview').textContent =
+      `Ela recebe ${formatCurrency(contratacao * percentual / 100)} na contratação (uma vez) e ${formatCurrency(mensalidade * percentual / 100)}/mês enquanto a mensalidade continuar.`;
+  };
+  ['ngContratacao', 'ngMensalidade', 'ngPercentual'].forEach(idInput => qs('#' + idInput).addEventListener('input', atualizarPreview));
+  atualizarPreview();
+
+  qs('#btnCancelNegociacao').onclick = closeModal;
+  qs('#negociacaoForm').onsubmit = (e) => {
+    e.preventDefault();
+    const data = {
+      clienteId: qs('#ngCliente').value,
+      colaboradora: qs('#ngColaboradora').value.trim(),
+      valorContratacao: Number(qs('#ngContratacao').value) || 0,
+      valorMensalidade: Number(qs('#ngMensalidade').value) || 0,
+      percentual: Number(qs('#ngPercentual').value) || 0,
+      observacoes: qs('#ngObservacoes').value.trim()
+    };
+    if (!data.colaboradora) return;
+    const negociacoes = getNegociacoes();
+    if (editing) {
+      const idx = negociacoes.findIndex(n => n.id === editing.id);
+      negociacoes[idx] = { ...editing, ...data };
+    } else {
+      negociacoes.push({ id: uid(), contratacaoPaga: false, mensalidadePagaMes: null, ...data });
+    }
+    saveNegociacoes(negociacoes);
+    closeModal();
+    renderNegociacoes();
   };
 }
 
