@@ -286,6 +286,166 @@ function chargeStatus(charge) {
 }
 
 
+// ---------- PIX: chave própria por cliente + QR Code (BRCode) ----------
+// Cada cliente (principalmente os de mensalidade recorrente) pode ter uma chave
+// Pix diferente da chave geral das Configurações. O QR Code é um Pix "copia e
+// cola" estático, já com o valor da cobrança, gerado aqui no navegador.
+function cpfValido(d) {
+  if (!/^\d{11}$/.test(d) || /^(\d)\1{10}$/.test(d)) return false;
+  for (let t = 9; t < 11; t++) {
+    let soma = 0;
+    for (let i = 0; i < t; i++) soma += Number(d[i]) * (t + 1 - i);
+    if (((soma * 10) % 11) % 10 !== Number(d[t])) return false;
+  }
+  return true;
+}
+// Deixa a chave no formato que o Pix exige dentro do QR Code.
+function normalizarChavePix(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (s.includes('@')) return s.toLowerCase();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return s.toLowerCase();
+  const d = onlyDigits(s);
+  if (s.startsWith('+')) return '+' + d;
+  if (/^\d{3}\.\d{3}\.\d{3}-\d{2}$/.test(s) || /^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$/.test(s)) return d;
+  if (d.length === 14) return d;
+  if (d.length === 11 && cpfValido(d) && !/[()]/.test(s)) return d;
+  if (d.length === 10 || d.length === 11) return '+55' + d;
+  if ((d.length === 12 || d.length === 13) && d.startsWith('55')) return '+' + d;
+  return s;
+}
+function pixCampo(id, valor) {
+  const v = String(valor);
+  return id + String(v.length).padStart(2, '0') + v;
+}
+function pixTextoSeguro(txt, max) {
+  return String(txt || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase().slice(0, max);
+}
+function pixCRC16(str) {
+  let crc = 0xFFFF;
+  for (let i = 0; i < str.length; i++) {
+    crc ^= str.charCodeAt(i) << 8;
+    for (let j = 0; j < 8; j++) crc = (crc & 0x8000) ? (((crc << 1) ^ 0x1021) & 0xFFFF) : ((crc << 1) & 0xFFFF);
+  }
+  return crc.toString(16).toUpperCase().padStart(4, '0');
+}
+function gerarPixPayload({ chave, nome, cidade, valor, txid }) {
+  const conta = pixCampo('00', 'br.gov.bcb.pix') + pixCampo('01', chave);
+  let p = pixCampo('00', '01') + pixCampo('01', '11') + pixCampo('26', conta) +
+    pixCampo('52', '0000') + pixCampo('53', '986');
+  if (Number(valor) > 0) p += pixCampo('54', Number(valor).toFixed(2));
+  p += pixCampo('58', 'BR') +
+    pixCampo('59', pixTextoSeguro(nome, 25) || 'RECEBEDOR') +
+    pixCampo('60', pixTextoSeguro(cidade, 15) || 'BRASIL') +
+    pixCampo('62', pixCampo('05', (txid || '').replace(/[^A-Za-z0-9]/g, '').slice(-25) || '***'));
+  p += '6304';
+  return p + pixCRC16(p);
+}
+// Qual chave/titular/cidade usar numa cobrança: a do cliente, se tiver; senão a geral.
+function pixConfigParaCliente(client) {
+  const s = getSettings();
+  const propria = !!(client && client.pixChave);
+  return {
+    propria,
+    chaveExibida: propria ? client.pixChave : (s.pix || ''),
+    chave: normalizarChavePix(propria ? client.pixChave : s.pix),
+    nome: (propria && client.pixTitular) || s.empresaNome || s.seuNome || '',
+    cidade: s.pixCidade || ''
+  };
+}
+function chargeAceitaPix(charge, client) {
+  const f = charge.formasPagamento;
+  if (!f) return true;
+  if (f.includes('pix')) return true;
+  return f.length === 0 && !!(client && client.pixChave);
+}
+function pixPayloadDaCobranca(charge) {
+  const client = charge.clientId ? clientById(charge.clientId) : null;
+  const cfg = pixConfigParaCliente(client);
+  if (!cfg.chave) return null;
+  return gerarPixPayload({ chave: cfg.chave, nome: cfg.nome, cidade: cfg.cidade, valor: charge.valor, txid: charge.id });
+}
+function pixQrCanvas(payload, escala = 8, margem = 4) {
+  if (typeof qrcode !== 'function') return null;
+  const qr = qrcode(0, 'M');
+  qr.addData(payload);
+  qr.make();
+  const n = qr.getModuleCount();
+  const c = document.createElement('canvas');
+  c.width = c.height = (n + margem * 2) * escala;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.fillStyle = '#000';
+  for (let r = 0; r < n; r++) for (let col = 0; col < n; col++) {
+    if (qr.isDark(r, col)) ctx.fillRect((col + margem) * escala, (r + margem) * escala, escala, escala);
+  }
+  return c;
+}
+function copiarTexto(txt) {
+  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(txt);
+  return new Promise((resolve) => {
+    const ta = document.createElement('textarea');
+    ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    ta.remove(); resolve();
+  });
+}
+function openPixQrModal(chargeId) {
+  const charge = getCharges().find(c => c.id === chargeId);
+  if (!charge) return;
+  const client = charge.clientId ? clientById(charge.clientId) : null;
+  const nome = client ? client.nome : (charge.avulsoNome || 'Cliente');
+  const cfg = pixConfigParaCliente(client);
+  const payload = pixPayloadDaCobranca(charge);
+  if (!payload) { alert('Cadastre uma chave Pix (no cliente ou em Configurações) pra gerar o QR Code.'); return; }
+  const canvas = pixQrCanvas(payload);
+  if (!canvas) { alert('Não consegui carregar o gerador de QR Code. Confira a conexão e recarregue a página.'); return; }
+  openModal(`
+    <div class="modal-title">QR Code Pix — ${escapeHtml(nome)}</div>
+    <div class="pix-qr-box">
+      <img class="pix-qr-img" id="pixQrImg" alt="QR Code Pix" src="${canvas.toDataURL('image/png')}">
+      <div class="pix-qr-valor">${formatCurrency(charge.valor)}</div>
+      <div class="view-desc" style="margin:0; text-align:center;">${escapeHtml(charge.descricao)} · vence ${formatDateBR(charge.vencimento)}</div>
+      <div class="view-desc" style="margin:0; text-align:center;">${cfg.propria ? '🔑 Chave própria do cliente' : '🔑 Chave geral'}: <b>${escapeHtml(cfg.chaveExibida)}</b></div>
+    </div>
+    <div class="field" style="margin-top:14px;">
+      <label class="field-label">Pix copia e cola</label>
+      <textarea class="input pix-code" id="pixCodigo" readonly rows="4">${escapeHtml(payload)}</textarea>
+    </div>
+    <div class="modal-actions" style="flex-wrap:wrap;">
+      <button type="button" class="btn btn-ghost" id="btnPixFechar">Fechar</button>
+      <button type="button" class="btn btn-ghost" id="btnPixBaixar">⬇️ Baixar QR (PNG)</button>
+      <button type="button" class="btn btn-ghost hidden" id="btnPixCompartilhar">📤 Compartilhar imagem</button>
+      <button type="button" class="btn btn-primary" id="btnPixCopiar">📋 Copiar código</button>
+    </div>
+  `);
+  const nomeArq = `pix-${nome.replace(/\s+/g, '-').toLowerCase()}-${charge.vencimento}.png`;
+  qs('#btnPixFechar').onclick = closeModal;
+  qs('#btnPixCopiar').onclick = () => {
+    copiarTexto(payload).then(() => {
+      const b = qs('#btnPixCopiar');
+      if (b) { b.textContent = '✅ Copiado!'; setTimeout(() => { if (qs('#btnPixCopiar')) qs('#btnPixCopiar').textContent = '📋 Copiar código'; }, 1800); }
+    });
+  };
+  qs('#btnPixBaixar').onclick = () => {
+    const a = document.createElement('a');
+    a.href = canvas.toDataURL('image/png');
+    a.download = nomeArq;
+    a.click();
+  };
+  canvas.toBlob(blob => {
+    if (!blob) return;
+    const file = new File([blob], nomeArq, { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [file] }) && qs('#btnPixCompartilhar')) {
+      const b = qs('#btnPixCompartilhar');
+      b.classList.remove('hidden');
+      b.onclick = () => navigator.share({ files: [file], text: `Pix de ${formatCurrency(charge.valor)} — ${charge.descricao}` }).catch(() => {});
+    }
+  });
+}
+
 // ---------- MENSALIDADES RECORRENTES + INDICAÇÕES ----------
 // Cliente com "recorrente = true" ganha uma cobrança de mensalidade lançada
 // sozinha a cada mês (valor = valorPlano, vence no diaVencimento).
@@ -352,7 +512,7 @@ function gerarMensalidadesRecorrentes() {
             descricao: `Mensalidade ${competenciaLabel(mes)} — ${planoTxt}`,
             valor: Number(cli.valorPlano),
             status: 'pendente', dataPagamento: null,
-            formasPagamento: settings.pix ? ['pix'] : []
+            formasPagamento: (settings.pix || cli.pixChave) ? ['pix'] : []
           });
         }
         ids.add(id);
@@ -1004,15 +1164,17 @@ function renderDashboard() {
   const meetings = getMeetings();
   const settings = getSettings();
 
-  const aReceber = charges.filter(c => chargeStatus(c) !== 'pago')
-    .reduce((sum, c) => sum + Number(c.valor), 0);
+  const mesAtual = todayISO().slice(0, 7);
+  // "A receber" e a lista de cobranças em aberto contam só o que vence NESTE mês.
+  // Atrasos de meses anteriores continuam visíveis no card "Atrasado".
+  const abertasMes = charges.filter(c => chargeStatus(c) !== 'pago' && (c.vencimento || '').slice(0, 7) === mesAtual);
+  const aReceber = abertasMes.reduce((sum, c) => sum + Number(c.valor), 0);
   const atrasado = charges.filter(c => chargeStatus(c) === 'atrasado')
     .reduce((sum, c) => sum + Number(c.valor), 0);
-  const mesAtual = todayISO().slice(0, 7);
   const recebidoMes = charges.filter(c => c.status === 'pago' && (c.dataPagamento || '').slice(0, 7) === mesAtual)
     .reduce((sum, c) => sum + Number(c.valor), 0);
 
-  const pendentes = charges.filter(c => chargeStatus(c) !== 'pago')
+  const pendentes = abertasMes
     .sort((a, b) => a.vencimento.localeCompare(b.vencimento))
     .slice(0, 8);
 
@@ -1091,7 +1253,7 @@ function renderDashboard() {
       <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">A receber</div>
         <div class="stat-value">${formatCurrency(aReceber)}</div>
-        <div class="stat-sub">${abertas.length} cobrança${abertas.length === 1 ? '' : 's'} em aberto</div>
+        <div class="stat-sub">${abertasMes.length} cobrança${abertasMes.length === 1 ? '' : 's'} em aberto · ${mesAnoLabel(mesAtual)}</div>
       </div>
       <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">Recebido no mês</div>
@@ -1112,7 +1274,7 @@ function renderDashboard() {
 
     <div class="dashboard-split">
       <div>
-        <div class="section-title section-title-row"><span>Cobranças em aberto</span><a href="#" class="section-link" data-go="cobrancas">ver todas →</a></div>
+        <div class="section-title section-title-row"><span>Cobranças em aberto · ${mesAnoLabel(mesAtual)}</span><a href="#" class="section-link" data-go="cobrancas">ver todas →</a></div>
         ${renderChargeLedger(pendentes, { compact: true })}
       </div>
       <div>
@@ -1419,6 +1581,18 @@ function openClientModal(id, onSaved) {
         </div>
       </div>
 
+      <div id="cPixRow" style="${editing && editing.recorrente ? '' : 'display:none;'}">
+        <div class="field">
+          <label class="field-label">🔑 Chave Pix deste cliente (opcional)</label>
+          <input class="input" id="cPixChave" placeholder="CPF, CNPJ, e-mail, celular ou chave aleatória" value="${editing ? escapeHtml(editing.pixChave || '') : ''}">
+          <div class="view-desc" style="margin-top:4px;">Se ficar vazio, usa a chave geral das Configurações. Celular: digite com +55 e DDD (ex: +5546999998888) pra não confundir com CPF.</div>
+        </div>
+        <div class="field">
+          <label class="field-label">Nome do titular da chave (opcional)</label>
+          <input class="input" id="cPixTitular" maxlength="25" placeholder="Aparece no app do banco ao pagar" value="${editing ? escapeHtml(editing.pixTitular || '') : ''}">
+        </div>
+      </div>
+
       <div class="field">
         <label class="field-label">Indicado por (opcional)</label>
         <select class="input" id="cIndicadoPor">
@@ -1462,6 +1636,7 @@ function openClientModal(id, onSaved) {
   };
   qs('#cRecorrente').onchange = () => {
     qs('#cRecorrenciaRow').style.display = qs('#cRecorrente').checked ? '' : 'none';
+    qs('#cPixRow').style.display = qs('#cRecorrente').checked ? '' : 'none';
   };
   qs('#clientForm').onsubmit = (e) => {
     e.preventDefault();
@@ -1520,6 +1695,12 @@ function openClientModal(id, onSaved) {
       return;
     }
 
+    const pixChaveRaw = qs('#cPixChave').value.trim();
+    if (pixChaveRaw && !/^[\x21-\x7E]+$/.test(normalizarChavePix(pixChaveRaw))) {
+      alert('A chave Pix não pode ter espaços ou caracteres especiais. Confira e tente de novo.');
+      return;
+    }
+
     const indicadoPor = qs('#cIndicadoPor').value;
     if (editing && indicadoPor === editing.id) {
       alert('Um cliente não pode ser indicado por ele mesmo.');
@@ -1544,7 +1725,9 @@ function openClientModal(id, onSaved) {
       indicadoPorTexto: qs('#cIndicadoPorTexto').value.trim(),
       recorrente,
       diaVencimento: diaVencimentoValido(qs('#cDiaVenc').value),
-      recorrenciaInicio: qs('#cRecInicio').value || todayISO().slice(0, 7)
+      recorrenciaInicio: qs('#cRecInicio').value || todayISO().slice(0, 7),
+      pixChave: pixChaveRaw,
+      pixTitular: qs('#cPixTitular').value.trim()
     };
     if (editing) {
       const idx = clients.findIndex(c => c.id === editing.id);
@@ -1616,6 +1799,7 @@ function renderClienteDetalhe(clientId) {
         <div class="stat-value" style="font-size:16px;">${client.plano ? escapeHtml(client.plano) : '—'}</div>
         ${client.valorPlano != null ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(client.valorPlano)}/mês</div>` : ''}
         ${client.recorrente ? `<div class="view-desc" style="margin-top:4px;">🔁 Lançamento automático, vence dia ${diaVencimentoValido(client.diaVencimento)}</div>` : ''}
+        ${client.pixChave ? `<div class="view-desc" style="margin-top:4px;">🔑 Pix próprio: ${escapeHtml(client.pixChave)}</div>` : ''}
       </div>
       <div class="stat-card">
         <div class="stat-label">Indicado por</div>
@@ -1847,6 +2031,7 @@ function renderChargeLedger(charges, opts = {}) {
           <span class="stamp-badge ${stampClass}">${stampLabel}</span>
           <div class="ledger-value">${formatCurrency(c.valor)}</div>
           <div class="ledger-actions">
+            ${status !== 'pago' && !c.isenta && Number(c.valor) > 0 && chargeAceitaPix(c, client) && pixConfigParaCliente(client).chave ? `<button class="btn btn-ghost btn-sm" data-pix-charge="${c.id}">QR Pix</button>` : ''}
             ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">Enviar</button>` : ''}
             ${status !== 'pago' ? `<button class="btn btn-ghost btn-sm" data-pay-charge="${c.id}">Marcar pago</button>` : ''}
             ${podeIsentar ? `<button class="btn btn-ghost btn-sm" data-isentar-charge="${c.id}">🎁 Isentar</button>` : ''}
@@ -1868,6 +2053,7 @@ function bindChargeActions() {
       row.style.display = row.textContent.toLowerCase().includes(termo) ? '' : 'none';
     });
   });
+  qsa('[data-pix-charge]').forEach(b => b.onclick = () => openPixQrModal(b.dataset.pixCharge));
   qsa('[data-send-charge]').forEach(b => b.onclick = () => openWhatsappModal(b.dataset.sendCharge));
   qsa('[data-pay-charge]').forEach(b => b.onclick = () => openMarkPaidModal(b.dataset.payCharge));
   qsa('[data-isentar-charge]').forEach(b => b.onclick = () => isentarCobranca(b.dataset.isentarCharge));
@@ -2101,7 +2287,7 @@ function openChargeModal(presets, onSaved) {
         <div class="payment-check-group">
           <label class="service-check" style="border-bottom:none; padding:8px 10px;">
             <input type="checkbox" id="chPagPix" ${getSettings().pix ? 'checked' : ''}>
-            <span>Pix ${getSettings().pix ? '' : '<span class="quick-calc-result" style="color:var(--ink-soft); display:inline;">(cadastre sua chave em Configurações)</span>'}</span>
+            <span>Pix ${getSettings().pix ? '' : '<span class="quick-calc-result" style="color:var(--ink-soft); display:inline;">(cadastre sua chave em Configurações ou no cadastro do cliente)</span>'}</span>
           </label>
           <label class="service-check" style="border-bottom:none; padding:8px 10px;">
             <input type="checkbox" id="chPagCartao">
@@ -2162,6 +2348,8 @@ function openChargeModal(presets, onSaved) {
 
   function atualizarHintPlano() {
     atualizarRecorrenciaUI();
+    const cliPix = qs('#chCliente') ? clientById(qs('#chCliente').value) : null;
+    if (cliPix && cliPix.pixChave && qs('#chPagPix')) qs('#chPagPix').checked = true;
     const hintEl = qs('#chPlanoHint');
     if (!hintEl) return;
     const clienteSelect = qs('#chCliente');
@@ -2447,15 +2635,37 @@ function renderTemplate(template, vars) {
   return String(template || '').replace(/\{(\w+)\}/g, (m, key) => (vars[key] != null ? vars[key] : ''));
 }
 
+// Cobrança de cliente recorrente (mensalidade): sempre manda chave + copia e cola + QR Code,
+// pra o cliente não errar na hora de pagar.
+function clienteEhRecorrente(charge, client) {
+  return !!(charge && (charge.recorrente || (client && client.recorrente)));
+}
+function pixChaveRotulo(chave) {
+  const aleatoria = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(chave || '').trim());
+  return aleatoria ? 'Chave PIX (aleatória)' : 'Chave PIX';
+}
+
 function buildLinhasPagamento(charge, settings) {
   // Compatibilidade: cobranças criadas antes dessa opção existir não têm
   // "formasPagamento" salvo — nesse caso, mantém o comportamento de sempre
   // mostrar a chave PIX (se configurada), igual funcionava antes.
-  const formas = charge.formasPagamento || (settings.pix ? ['pix'] : []);
+  const client = charge.clientId ? clientById(charge.clientId) : null;
+  const cfgPix = pixConfigParaCliente(client);
+  const formas = charge.formasPagamento || [];
   let linhas = '';
-  if (formas.includes('pix') && settings.pix) {
-    linhas += `\n💳 Chave PIX: *${settings.pix}*`;
+  if (chargeAceitaPix(charge, client) && cfgPix.chaveExibida) {
+    linhas += `\n💳 ${pixChaveRotulo(cfgPix.chaveExibida)}: *${cfgPix.chaveExibida}*`;
+    // Cliente com chave própria OU recorrente: manda também o Pix copia e cola, já com o valor.
+    const recorr = clienteEhRecorrente(charge, client);
+    if (cfgPix.chave && Number(charge.valor) > 0 && !charge.isenta) {
+      linhas += recorr
+        // Recorrente: QR Code junto + copia e cola numa 2ª mensagem (fácil de copiar).
+        ? `\n📷 Pode pagar pelo QR Code (imagem) ou pelo Pix copia e cola, que te mando logo em seguida.`
+        // Demais clientes: chave + QR Code.
+        : `\n📷 Pode pagar pela chave ou pelo QR Code (imagem) que vai junto.`;
+    }
   }
+
   if (formas.includes('cartao')) {
     linhas += charge.linkPagamentoCartao
       ? `\n💳 Link para pagar no cartão (crédito/débito): ${charge.linkPagamentoCartao}`
@@ -2499,7 +2709,16 @@ function openWhatsappModal(chargeId) {
   const charge = getCharges().find(c => c.id === chargeId);
   const client = charge.clientId ? clientById(charge.clientId) : { nome: charge.avulsoNome, telefone: charge.avulsoTelefone };
   if (!client || !client.telefone) { alert('Essa cobrança não tem um WhatsApp válido pra enviar.'); return; }
-  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client));
+  let opts = null;
+  if (!charge.isenta && Number(charge.valor) > 0 && chargeAceitaPix(charge, client)) {
+    const payload = pixPayloadDaCobranca(charge);
+    const canvas = payload ? pixQrCanvas(payload) : null;
+    if (canvas) {
+      const nomeArq = `pix-${String(client.nome).replace(/\s+/g, '-').toLowerCase()}-${charge.vencimento}.png`;
+      opts = { qrCanvas: canvas, nomeArq, payload: clienteEhRecorrente(charge, client) ? payload : null };
+    }
+  }
+  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client), null, opts);
 }
 
 function buildMeetingMessage(meeting, client) {
@@ -2533,9 +2752,15 @@ function openMeetingWhatsappModal(meetingId) {
   openSendWhatsappModal(`Enviar lembrete — ${client.nome}`, client, buildMeetingMessage(meeting, client));
 }
 
-function openSendWhatsappModal(title, client, defaultMsg, onSent) {
+function openSendWhatsappModal(title, client, defaultMsg, onSent, opts) {
+  const qr = opts && opts.qrCanvas ? opts : null;
   openModal(`
     <div class="modal-title">${escapeHtml(title)}</div>
+    ${qr ? `
+    <div class="pix-qr-box" style="margin-bottom:12px;">
+      <img class="pix-qr-img" style="width:150px;" alt="QR Code Pix" src="${qr.qrCanvas.toDataURL('image/png')}">
+      <div class="view-desc" style="margin:0; text-align:center;">📷 QR Code Pix que vai junto com a mensagem</div>
+    </div>` : ''}
     <div class="field">
       <label class="field-label">Mensagem (pode editar antes de enviar)</label>
       <textarea class="input" id="waMsg" style="min-height:170px;">${escapeHtml(defaultMsg)}</textarea>
@@ -2544,16 +2769,70 @@ function openSendWhatsappModal(title, client, defaultMsg, onSent) {
       <label class="field-label">Número do WhatsApp</label>
       <input class="input" id="waPhone" value="${escapeHtml(client.telefone)}">
     </div>
-    <div class="modal-actions">
-      <button type="button" class="btn btn-ghost" id="btnCancelWa">Não enviar agora</button>
-      <button type="button" class="btn btn-whatsapp" id="btnOpenWa">Enviar no WhatsApp</button>
+    ${qr ? `<div class="view-desc" id="waHint" style="margin:0 0 10px;">${qr.payload ? 'Ordem: 1) mensagem + QR Code · 2) só o copia e cola, em mensagem separada.' : 'Envie a mensagem e cole o QR Code na conversa.'}</div>` : ''}
+    <div class="modal-actions" style="flex-wrap:wrap;">
+      <button type="button" class="btn btn-ghost" id="btnCancelWa">${qr ? 'Fechar' : 'Não enviar agora'}</button>
+      ${qr ? `<button type="button" class="btn btn-ghost" id="btnBaixarQrWa">⬇️ Baixar QR</button>
+      ${qr.payload ? `<button type="button" class="btn btn-whatsapp" id="btnCodigoWa">📋 2ª mensagem: só o copia e cola</button>` : ''}
+      <button type="button" class="btn btn-whatsapp hidden" id="btnShareWa">📤 Compartilhar texto + QR</button>` : ''}
+      <button type="button" class="btn btn-whatsapp" id="btnOpenWa">${qr ? 'Abrir conversa e copiar QR' : 'Enviar no WhatsApp'}</button>
     </div>
   `);
   qs('#btnCancelWa').onclick = closeModal;
+
+  let qrBlob = null;
+  const hint = (t) => { const h = qs('#waHint'); if (h) h.textContent = t; };
+  if (qr) {
+    qs('#btnBaixarQrWa').onclick = () => {
+      const a = document.createElement('a');
+      a.href = qr.qrCanvas.toDataURL('image/png');
+      a.download = qr.nomeArq;
+      a.click();
+    };
+    qr.qrCanvas.toBlob(blob => {
+      if (!blob) return;
+      qrBlob = blob;
+      const file = new File([blob], qr.nomeArq, { type: 'image/png' });
+      // Celular: o menu "Compartilhar" manda imagem + texto de uma vez pro WhatsApp.
+      if (navigator.canShare && navigator.canShare({ files: [file] }) && qs('#btnShareWa')) {
+        const b = qs('#btnShareWa');
+        b.classList.remove('hidden');
+        b.onclick = () => {
+          navigator.share({ files: [file], text: qs('#waMsg').value })
+            .then(() => { closeModal(); if (onSent) onSent(); })
+            .catch(() => {});
+        };
+      }
+    });
+  }
+
+  if (qr && qr.payload) {
+    // Manda o código sozinho numa mensagem: o cliente segura e copia sem pegar texto extra.
+    qs('#btnCodigoWa').onclick = () => {
+      const phone = onlyDigits(qs('#waPhone').value);
+      if (phone.length < 10) { alert('Número de WhatsApp inválido.'); return; }
+      window.open(`https://wa.me/${phone}?text=${encodeURIComponent(qr.payload)}`, '_blank');
+    };
+  }
+
   qs('#btnOpenWa').onclick = () => {
     const phone = onlyDigits(qs('#waPhone').value);
     const msg = qs('#waMsg').value;
     if (phone.length < 10) { alert('Número de WhatsApp inválido.'); return; }
+    if (qr) {
+      // Copia o QR pra área de transferência e abre a conversa com o texto;
+      // é só colar a imagem na conversa (Ctrl+V / segurar e colar).
+      let copiou = Promise.reject();
+      if (qrBlob && navigator.clipboard && window.ClipboardItem) {
+        try { copiou = navigator.clipboard.write([new ClipboardItem({ 'image/png': qrBlob })]); } catch (e) {}
+      }
+      window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
+      copiou
+        .then(() => hint('✅ Conversa aberta e QR Code copiado. Cole a imagem na conversa (Ctrl+V, ou segure e toque em "Colar") e envie.'))
+        .catch(() => hint('Conversa aberta. Toque em "Baixar QR" e anexe a imagem na conversa.'));
+      if (onSent) onSent();
+      return;
+    }
     window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
     closeModal();
     if (onSent) onSent();
@@ -4559,6 +4838,10 @@ function renderConfig() {
         <input class="input" id="sPix" value="${escapeHtml(s.pix || '')}">
       </div>
       <div class="field">
+        <label class="field-label">Cidade (usada no QR Code Pix, opcional)</label>
+        <input class="input" id="sPixCidade" maxlength="15" placeholder="Ex: Dois Vizinhos" value="${escapeHtml(s.pixCidade || '')}">
+      </div>
+      <div class="field">
         <label class="field-label">Desconto por indicação (R$, opcional)</label>
         <input class="input" type="number" min="0" step="0.01" id="sDescontoIndicacao" value="${s.valorDescontoIndicacao != null ? s.valorDescontoIndicacao : ''}">
       </div>
@@ -4706,6 +4989,7 @@ function renderConfig() {
       seuNome: qs('#sSeuNome').value.trim(),
       empresaNome: qs('#sEmpresa').value.trim(),
       pix: qs('#sPix').value.trim(),
+      pixCidade: qs('#sPixCidade').value.trim(),
       valorDescontoIndicacao: qs('#sDescontoIndicacao').value === '' ? null : Number(qs('#sDescontoIndicacao').value)
     });
     refreshBrandBar();
