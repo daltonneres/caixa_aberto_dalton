@@ -11,7 +11,8 @@
 const qs = (sel, el = document) => el.querySelector(sel);
 const qsa = (sel, el = document) => Array.from(el.querySelectorAll(sel));
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-const todayISO = () => new Date().toISOString().slice(0, 10);
+// data de HOJE no fuso do aparelho (não em UTC — senão, depois das 21h no Brasil, já viraria o dia seguinte)
+const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 function formatCurrency(v) {
   const n = Number(v) || 0;
@@ -243,6 +244,7 @@ let _contratos = [];
 let _mensalidades = [];
 let _colaboradores = [];
 let _negociacoes = [];
+let _saidas = [];
 let _settings = {};
 let _docRef = null;
 let _unsubscribeSnapshot = null;
@@ -259,6 +261,7 @@ function getContratos() { return _contratos; }
 function getMensalidades() { return _mensalidades; }
 function getColaboradores() { return _colaboradores; }
 function getNegociacoes() { return _negociacoes; }
+function getSaidas() { return _saidas; }
 function getSettings() { return _settings; }
 
 function saveClients(list) { _clients = list; queuePersist(); }
@@ -270,6 +273,7 @@ function saveContratos(list) { _contratos = list; queuePersist(); }
 function saveMensalidades(list) { _mensalidades = list; queuePersist(); }
 function saveColaboradores(list) { _colaboradores = list; queuePersist(); }
 function saveNegociacoes(list) { _negociacoes = list; queuePersist(); }
+function saveSaidas(list) { _saidas = list; queuePersist(); }
 function saveSettings(s) { _settings = s; queuePersist(); }
 
 function clientById(id) { return getClients().find(c => c.id === id); }
@@ -279,6 +283,136 @@ function chargeStatus(charge) {
   if (charge.status === 'pago') return 'pago';
   if (charge.vencimento < todayISO()) return 'atrasado';
   return 'pendente';
+}
+
+
+// ---------- MENSALIDADES RECORRENTES + INDICAÇÕES ----------
+// Cliente com "recorrente = true" ganha uma cobrança de mensalidade lançada
+// sozinha a cada mês (valor = valorPlano, vence no diaVencimento).
+// Indicação: quando o cliente INDICADO paga a 1ª mensalidade, quem indicou
+// ganha 1 mensalidade isenta, que é usada na próxima cobrança recorrente
+// gerada (ou manualmente, no botão "Isentar" de uma mensalidade em aberto).
+function proximoMesISO(mes) {
+  let [a, m] = mes.split('-').map(Number);
+  m++;
+  if (m > 12) { m = 1; a++; }
+  return `${a}-${String(m).padStart(2, '0')}`;
+}
+function competenciaLabel(mes) {
+  const [a, m] = mes.split('-');
+  return `${m}/${a}`;
+}
+function diaVencimentoValido(d) {
+  const n = Math.round(Number(d));
+  return Number.isFinite(n) ? Math.min(28, Math.max(1, n)) : 5;
+}
+
+// Lança as mensalidades que faltam (do mês de início até o mês atual).
+// É idempotente: o id da cobrança é fixo (rec-<cliente>-<mês>), então rodar
+// várias vezes nunca duplica. Retorna quantas cobranças foram criadas.
+function gerarMensalidadesRecorrentes() {
+  if (!_docRef) return 0;
+  const mesHoje = todayISO().slice(0, 7);
+  const settings = getSettings();
+  const charges = getCharges().slice();
+  const ids = new Set(charges.map(c => c.id));
+  let criadas = 0;
+  let mudouClientes = false;
+
+  const clients = getClients().map(c => {
+    if (!c.recorrente || !(Number(c.valorPlano) > 0)) return c;
+    let mes = c.recorrenciaInicio || mesHoje;
+    if (c.recorrenciaUltimoMes && proximoMesISO(c.recorrenciaUltimoMes) > mes) mes = proximoMesISO(c.recorrenciaUltimoMes);
+    if (mes > mesHoje) return c;
+
+    let cli = { ...c };
+    let guard = 0;
+    while (mes <= mesHoje && guard++ < 36) {
+      const id = `rec-${cli.id}-${mes}`;
+      if (!ids.has(id)) {
+        const venc = `${mes}-${String(diaVencimentoValido(cli.diaVencimento)).padStart(2, '0')}`;
+        const planoTxt = cli.plano || 'plano';
+        const base = {
+          id, clientId: cli.id, avulsoNome: null, avulsoTelefone: null,
+          tipo: 'mensalidade', competencia: mes, recorrente: true,
+          vencimento: venc, createdAt: todayISO(), linkPagamentoCartao: null, boletoLink: null, boletoCodigo: null
+        };
+        if ((Number(cli.isencoesDisponiveis) || 0) > 0) {
+          charges.push({
+            ...base,
+            descricao: `Mensalidade ${competenciaLabel(mes)} — ${planoTxt} (isenta por indicação)`,
+            valor: 0, valorOriginal: Number(cli.valorPlano),
+            status: 'pago', dataPagamento: todayISO(), isenta: true, formasPagamento: []
+          });
+          cli.isencoesDisponiveis = Number(cli.isencoesDisponiveis) - 1;
+          cli.isencoesUsadas = (Number(cli.isencoesUsadas) || 0) + 1;
+        } else {
+          charges.push({
+            ...base,
+            descricao: `Mensalidade ${competenciaLabel(mes)} — ${planoTxt}`,
+            valor: Number(cli.valorPlano),
+            status: 'pendente', dataPagamento: null,
+            formasPagamento: settings.pix ? ['pix'] : []
+          });
+        }
+        ids.add(id);
+        criadas++;
+      }
+      cli.recorrenciaUltimoMes = mes;
+      mes = proximoMesISO(mes);
+    }
+    mudouClientes = true;
+    return cli;
+  });
+
+  if (criadas > 0 || mudouClientes) {
+    _clients = clients;
+    _charges = charges;
+    queuePersist();
+  }
+  return criadas;
+}
+
+// Chamado quando uma cobrança é marcada como paga. Se for a 1ª mensalidade
+// paga de um cliente indicado por outro cliente, premia quem indicou.
+// Retorna o nome de quem ganhou a isenção (ou null).
+function concederIsencaoPorIndicacao(charge) {
+  if (!charge || !charge.clientId || charge.tipo !== 'mensalidade' || charge.isenta) return null;
+  const indicado = clientById(charge.clientId);
+  if (!indicado || !indicado.indicadoPor || indicado.indicacaoPremiada) return null;
+  const indicador = clientById(indicado.indicadoPor);
+  if (!indicador) return null;
+  const jaPagouAntes = getCharges().some(ch =>
+    ch.id !== charge.id && ch.clientId === indicado.id && ch.tipo === 'mensalidade' && !ch.isenta && ch.status === 'pago');
+  if (jaPagouAntes) return null;
+
+  saveClients(getClients().map(c => {
+    if (c.id === indicador.id) {
+      return { ...c, isencoesDisponiveis: (Number(c.isencoesDisponiveis) || 0) + 1, isencoesGanhas: (Number(c.isencoesGanhas) || 0) + 1 };
+    }
+    if (c.id === indicado.id) {
+      return { ...c, indicacaoPremiada: true, indicacaoPremiadaEm: todayISO() };
+    }
+    return c;
+  }));
+  return indicador.nome;
+}
+
+// Troca uma mensalidade em aberto por isenta, gastando 1 isenção do cliente.
+function isentarCobranca(chargeId) {
+  const charge = getCharges().find(c => c.id === chargeId);
+  if (!charge || !charge.clientId) return;
+  const cli = clientById(charge.clientId);
+  if (!cli || (Number(cli.isencoesDisponiveis) || 0) < 1) { alert('Esse cliente não tem mensalidade isenta disponível.'); return; }
+  if (!confirm(`Usar 1 mensalidade isenta de ${cli.nome} nesta cobrança (${formatCurrency(charge.valor)})? Ela vai ficar como paga, com valor zero.`)) return;
+  saveCharges(getCharges().map(c => c.id !== chargeId ? c : {
+    ...c, valorOriginal: Number(c.valor), valor: 0, status: 'pago', dataPagamento: todayISO(), isenta: true,
+    descricao: c.descricao + ' (isenta por indicação)'
+  }));
+  saveClients(getClients().map(c => c.id !== cli.id ? c : {
+    ...c, isencoesDisponiveis: Number(c.isencoesDisponiveis) - 1, isencoesUsadas: (Number(c.isencoesUsadas) || 0) + 1
+  }));
+  navigate(currentView);
 }
 
 // agrupa várias mudanças rápidas seguidas numa única escrita no Firestore
@@ -297,6 +431,7 @@ function queuePersist() {
       colaboradores: _colaboradores.map(c => c.uid),
       colaboradoresInfo: _colaboradores,
       negociacoes: _negociacoes,
+      saidas: _saidas,
       settings: _settings,
       updatedAt: new Date().toISOString()
     }, { merge: true }).catch(err => {
@@ -324,9 +459,14 @@ function showSyncError() {
 // chegam de novo pelo Firestore (própria escrita ou outro aparelho)
 let currentDetailClientId = null;
 let _orcamentoView = 'lista';
+let _servicosTab = 'catalogo'; // catalogo | mensalidades | orcamentos
+let _mensSubtab = 'planos';    // planos | recorrentes | indicacoes
 
+let _recorrenciaTimer = null;
 function startFirestoreSync(donoUid) {
   _syncTargetUid = donoUid;
+  // se o app ficar aberto na virada do mês, lança a nova mensalidade sozinho
+  if (!_recorrenciaTimer) _recorrenciaTimer = setInterval(() => { gerarMensalidadesRecorrentes(); }, 60 * 60 * 1000);
   _docRef = db.collection('users').doc(donoUid).collection('app').doc('data');
   _unsubscribeSnapshot = _docRef.onSnapshot(snap => {
     const data = snap.data() || {};
@@ -339,12 +479,16 @@ function startFirestoreSync(donoUid) {
     _mensalidades = data.mensalidades || [];
     _colaboradores = data.colaboradoresInfo || (data.colaboradores || []).map(uid => ({ uid, apelido: '' }));
     _negociacoes = data.negociacoes || [];
+    _saidas = data.saidas || [];
     _settings = data.settings || {};
     if (_settings.tema) {
       localStorage.setItem('ca_tema', _settings.tema);
       applyTheme(_settings.tema);
     }
     refreshBrandBar();
+    // lança as mensalidades recorrentes que faltam (só com dados vindos do servidor,
+    // pra nunca gerar em cima de um cache desatualizado)
+    if (!snap.metadata.fromCache) gerarMensalidadesRecorrentes();
     if (currentDetailClientId && clientById(currentDetailClientId)) {
       renderClienteDetalhe(currentDetailClientId);
     } else {
@@ -414,7 +558,7 @@ function stopFirestoreSync() {
   if (_unsubscribeSnapshot) _unsubscribeSnapshot();
   _unsubscribeSnapshot = null;
   _docRef = null;
-  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _negociacoes = []; _settings = {};
+  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _negociacoes = []; _saidas = []; _settings = {};
 }
 
 // ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
@@ -536,15 +680,16 @@ let currentView = 'dashboard';
 function navigate(view) {
   currentDetailClientId = null;
   currentView = view;
-  qsa('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === view));
+  qsa('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === (view === 'mensalidades' ? 'servicos' : view)));
   const renderers = {
     dashboard: renderDashboard,
     clientes: renderClientes,
     calculadora: renderCalculadora,
     cobrancas: renderCobrancas,
+    saidas: renderSaidas,
     agenda: renderAgenda,
     servicos: renderServicos,
-    mensalidades: renderMensalidades,
+    mensalidades: renderMensalidades, // atalho antigo: abre a aba dentro de Serviços
     negociacoes: renderNegociacoes,
     relatorios: renderRelatorios,
     contratos: renderContratos,
@@ -885,11 +1030,28 @@ function renderDashboard() {
   const nomeUsuario = getNomeSaudacao() ? `, ${escapeHtml(getNomeSaudacao())}` : '';
   const proximaReuniao = proximasReunioes[0] || null;
 
+  const abertas = charges.filter(c => chargeStatus(c) !== 'pago');
+  const nAtrasadas = abertas.filter(c => chargeStatus(c) === 'atrasado').length;
+  const recorrenteMes = clients.filter(c => c.recorrente).reduce((s, c) => s + (Number(c.valorPlano) || 0), 0);
+  const nRecorrentes = clients.filter(c => c.recorrente).length;
+  const orcAndamento = getOrcamentos().filter(o => ['enviado', 'aguardando_retorno'].includes(o.status || 'nao_enviado'));
+  const orcSemNovidade = orcAndamento.filter(o => daysUntil(o.atualizadoEm || o.criadoEm) <= -3).length;
+  const nNegociacoes = getNegociacoes();
+  const comissoesPendentes =
+    nNegociacoes.filter(n => !n.contratacaoPaga).reduce((s, n) => s + comissaoContratacao(n), 0) +
+    nNegociacoes.filter(n => Number(n.valorMensalidade) > 0 && !mensalidadeEstaPagaEsteMes(n)).reduce((s, n) => s + comissaoMensal(n), 0);
+
   qs('#main').innerHTML = `
     <div class="view-header">
       <div>
         <div class="view-title">${getGreeting()}${nomeUsuario} 👋</div>
         <div class="view-desc">${formatDateLongPT()}</div>
+      </div>
+      <div class="tab-actions">
+        <button class="btn btn-primary btn-sm" id="qaCobranca">+ Cobrança</button>
+        <button class="btn btn-ghost btn-sm" id="qaCliente">+ Cliente</button>
+        <button class="btn btn-ghost btn-sm" id="qaReuniao">+ Reunião</button>
+        <button class="btn btn-ghost btn-sm" id="qaOrcamento">+ Orçamento</button>
       </div>
     </div>
 
@@ -926,31 +1088,35 @@ function renderDashboard() {
     ` : '')}
 
     <div class="cards-grid">
-      <div class="stat-card">
+      <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">A receber</div>
         <div class="stat-value">${formatCurrency(aReceber)}</div>
+        <div class="stat-sub">${abertas.length} cobrança${abertas.length === 1 ? '' : 's'} em aberto</div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">Recebido no mês</div>
         <div class="stat-value emerald">${formatCurrency(recebidoMes)}</div>
+        <div class="stat-sub">${mesAnoLabel(mesAtual)}</div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">Atrasado</div>
         <div class="stat-value brick">${formatCurrency(atrasado)}</div>
+        <div class="stat-sub">${nAtrasadas === 0 ? 'nada atrasado 👏' : nAtrasadas + ' cobrança' + (nAtrasadas === 1 ? '' : 's')}</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-label">Clientes cadastrados</div>
-        <div class="stat-value">${clients.length}</div>
+      <div class="stat-card stat-link" data-go="clientes">
+        <div class="stat-label">Recorrente / mês</div>
+        <div class="stat-value">${formatCurrency(recorrenteMes)}</div>
+        <div class="stat-sub">${nRecorrentes} de ${clients.length} cliente${clients.length === 1 ? '' : 's'}</div>
       </div>
     </div>
 
     <div class="dashboard-split">
       <div>
-        <div class="section-title">Próximas cobranças em aberto</div>
+        <div class="section-title section-title-row"><span>Cobranças em aberto</span><a href="#" class="section-link" data-go="cobrancas">ver todas →</a></div>
         ${renderChargeLedger(pendentes, { compact: true })}
       </div>
       <div>
-        <div class="section-title">Próximas reuniões</div>
+        <div class="section-title section-title-row"><span>Próximas reuniões</span><a href="#" class="section-link" data-go="agenda">abrir agenda →</a></div>
         ${proximasReunioes.length === 0 ? emptyState('Nada marcado', 'Sua agenda está livre por enquanto.') : `
           <div class="ledger">
             ${proximasReunioes.map(m => {
@@ -968,38 +1134,148 @@ function renderDashboard() {
         `}
       </div>
     </div>
+
+    ${(orcAndamento.length > 0 || comissoesPendentes > 0) ? `
+      <div class="section-title" style="margin-top:30px;">De olho</div>
+      <div class="cards-grid cards-grid-3 cards-grid-tight">
+        ${orcAndamento.length > 0 ? `
+        <div class="stat-card stat-link" data-go-orc="1">
+          <div class="stat-label">Orçamentos esperando resposta</div>
+          <div class="stat-value amber">${orcAndamento.length}</div>
+          <div class="stat-sub">${orcSemNovidade > 0 ? `🔔 ${orcSemNovidade} sem novidade há 3+ dias` : 'todos recentes'}</div>
+        </div>` : ''}
+        ${comissoesPendentes > 0 ? `
+        <div class="stat-card stat-link" data-go="negociacoes">
+          <div class="stat-label">Comissões a pagar (parcerias)</div>
+          <div class="stat-value brick">${formatCurrency(comissoesPendentes)}</div>
+          <div class="stat-sub">contratação + mensalidades do mês</div>
+        </div>` : ''}
+      </div>
+    ` : ''}
   `;
 
   bindChargeActions();
   qsa('[data-view-client]').forEach(a => a.onclick = (e) => { e.preventDefault(); renderClienteDetalhe(a.dataset.viewClient); });
+  qsa('[data-go-orc]').forEach(el => el.onclick = () => { _servicosTab = 'orcamentos'; navigate('servicos'); });
+  qsa('[data-go]').forEach(el => el.onclick = (e) => { e.preventDefault(); navigate(el.dataset.go); });
+  qs('#qaCobranca').onclick = () => openChargeModal();
+  qs('#qaCliente').onclick = () => openClientModal();
+  qs('#qaReuniao').onclick = () => openMeetingModal(null, null, () => renderDashboard());
+  qs('#qaOrcamento').onclick = () => { _servicosTab = 'orcamentos'; navigate('servicos'); };
 }
 
 // ---------- CLIENTES ----------
+let _clientesFiltro = { busca: '', status: 'todos', ordem: 'nome' };
+
+function semAcento(s) { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+function iniciaisNome(nome) {
+  const p = String(nome || '?').trim().split(/\s+/).filter(Boolean);
+  return ((p[0] || '?')[0] + (p.length > 1 ? p[p.length - 1][0] : '')).toUpperCase();
+}
+
 function renderClientes() {
   const clients = getClients();
+  const charges = getCharges();
+
+  const aberto = {};
+  const atrasados = new Set();
+  charges.forEach(ch => {
+    if (!ch.clientId || chargeStatus(ch) === 'pago') return;
+    aberto[ch.clientId] = (aberto[ch.clientId] || 0) + Number(ch.valor || 0);
+    if (chargeStatus(ch) === 'atrasado') atrasados.add(ch.clientId);
+  });
+  const nComAberto = clients.filter(c => aberto[c.id] > 0).length;
+  const nRecorrentes = clients.filter(c => c.recorrente).length;
+
   qs('#main').innerHTML = `
     <div class="view-header">
       <div>
         <div class="view-title">Clientes</div>
-        <div class="view-desc">Cadastre quem você cobra</div>
+        <div class="view-desc">Quem você atende e cobra</div>
       </div>
       <button class="btn btn-primary" id="btnNovoCliente">+ Novo cliente</button>
     </div>
+
     ${clients.length === 0 ? emptyState('Nenhum cliente ainda', 'Cadastre o primeiro cliente para começar a lançar cobranças.') : `
+      <div class="cards-grid">
+        <div class="stat-card">
+          <div class="stat-label">Clientes</div>
+          <div class="stat-value">${clients.length}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Em dia</div>
+          <div class="stat-value emerald">${clients.length - nComAberto}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Com valor em aberto</div>
+          <div class="stat-value brick">${nComAberto}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Mensalidade automática</div>
+          <div class="stat-value">${nRecorrentes}</div>
+        </div>
+      </div>
+
+      <div class="filter-bar">
+        <input class="input filter-search" id="cliBusca" type="search" placeholder="🔍 Buscar por nome, telefone, e-mail ou cidade" value="${escapeHtml(_clientesFiltro.busca)}">
+        <select class="input filter-select" id="cliStatus">
+          <option value="todos" ${_clientesFiltro.status === 'todos' ? 'selected' : ''}>Todos</option>
+          <option value="aberto" ${_clientesFiltro.status === 'aberto' ? 'selected' : ''}>Com valor em aberto</option>
+          <option value="atrasado" ${_clientesFiltro.status === 'atrasado' ? 'selected' : ''}>Com atraso</option>
+          <option value="emdia" ${_clientesFiltro.status === 'emdia' ? 'selected' : ''}>Em dia</option>
+          <option value="recorrente" ${_clientesFiltro.status === 'recorrente' ? 'selected' : ''}>Mensalidade automática</option>
+        </select>
+        <select class="input filter-select" id="cliOrdem">
+          <option value="nome" ${_clientesFiltro.ordem === 'nome' ? 'selected' : ''}>Ordem: nome (A–Z)</option>
+          <option value="aberto" ${_clientesFiltro.ordem === 'aberto' ? 'selected' : ''}>Ordem: maior valor em aberto</option>
+        </select>
+      </div>
+
+      <div id="clientesLista"></div>
+    `}
+  `;
+
+  qs('#btnNovoCliente').onclick = () => openClientModal();
+  if (clients.length === 0) return;
+
+  function pintarLista() {
+    const termo = semAcento(_clientesFiltro.busca.trim());
+    let lista = clients.filter(c => {
+      if (termo) {
+        const alvo = semAcento([c.nome, c.telefone, c.email, c.cidade, c.plano].join(' '));
+        if (!alvo.includes(termo)) return false;
+      }
+      const v = aberto[c.id] || 0;
+      switch (_clientesFiltro.status) {
+        case 'aberto': return v > 0;
+        case 'atrasado': return atrasados.has(c.id);
+        case 'emdia': return v === 0;
+        case 'recorrente': return !!c.recorrente;
+        default: return true;
+      }
+    });
+    lista = lista.slice().sort((a, b) => _clientesFiltro.ordem === 'aberto'
+      ? ((aberto[b.id] || 0) - (aberto[a.id] || 0)) || a.nome.localeCompare(b.nome, 'pt-BR')
+      : a.nome.localeCompare(b.nome, 'pt-BR'));
+
+    qs('#clientesLista').innerHTML = lista.length === 0
+      ? emptyState('Nenhum cliente encontrado', 'Tente outra busca ou mude o filtro.')
+      : `
       <div class="ledger">
-        ${clients.map(c => {
-          const totalAberto = getCharges().filter(ch => ch.clientId === c.id && chargeStatus(ch) !== 'pago')
-            .reduce((s, ch) => s + Number(ch.valor), 0);
+        ${lista.map(c => {
+          const v = aberto[c.id] || 0;
+          const contato = [c.telefone, c.email, c.cidade].filter(Boolean).map(escapeHtml).join(' · ') || 'sem contato';
           return `
-          <div class="ledger-row client-row">
+          <div class="ledger-row client-row client-row-click" data-row-client="${c.id}">
+            <div class="client-avatar">${escapeHtml(iniciaisNome(c.nome))}</div>
             <div class="ledger-main">
-              <div class="ledger-title">${escapeHtml(c.nome)}</div>
-              <div class="ledger-sub">${escapeHtml(c.telefone || 'sem telefone')} ${c.email ? '· ' + escapeHtml(c.email) : ''} ${c.cidade ? '· ' + escapeHtml(c.cidade) : ''}</div>
+              <div class="ledger-title">${escapeHtml(c.nome)}${c.plano ? ` <span class="avulso-tag">${escapeHtml(c.plano)}</span>` : ''}</div>
+              <div class="ledger-sub">${contato}</div>
             </div>
             <div class="client-status">
-              ${c.plano ? `<span class="stamp-badge stamp-pausado">${escapeHtml(c.plano)}</span>` : ''}
-              ${totalAberto > 0
-                ? `<span class="stamp-badge stamp-atrasado">${formatCurrency(totalAberto)} em aberto</span>`
+              ${c.recorrente ? `<span class="stamp-badge stamp-pausado">🔁 dia ${diaVencimentoValido(c.diaVencimento)}</span>` : ''}
+              ${v > 0
+                ? `<span class="stamp-badge ${atrasados.has(c.id) ? 'stamp-atrasado' : 'stamp-pendente'}">${formatCurrency(v)} em aberto</span>`
                 : `<span class="stamp-badge stamp-pago">Em dia</span>`}
             </div>
             <div class="ledger-actions">
@@ -1010,24 +1286,31 @@ function renderClientes() {
           </div>`;
         }).join('')}
       </div>
-    `}
-  `;
+      <div class="view-desc" style="margin-top:10px;">${lista.length} de ${clients.length} cliente${clients.length > 1 ? 's' : ''}</div>
+    `;
 
-  qs('#btnNovoCliente').onclick = () => openClientModal();
-  qsa('[data-view-client]').forEach(b => b.onclick = () => renderClienteDetalhe(b.dataset.viewClient));
-  qsa('[data-edit-client]').forEach(b => b.onclick = () => openClientModal(b.dataset.editClient));
-  qsa('[data-del-client]').forEach(b => b.onclick = () => {
-    const id = b.dataset.delClient;
-    const temCobranca = getCharges().some(ch => ch.clientId === id);
-    const msg = temCobranca
-      ? 'Este cliente tem cobranças lançadas. Excluir o cliente também vai apagar as cobranças dele. Confirma?'
-      : 'Excluir este cliente?';
-    if (confirm(msg)) {
-      saveClients(getClients().filter(c => c.id !== id));
-      saveCharges(getCharges().filter(ch => ch.clientId !== id));
-      renderClientes();
-    }
-  });
+    qsa('[data-view-client]').forEach(b => b.onclick = (e) => { e.stopPropagation(); renderClienteDetalhe(b.dataset.viewClient); });
+    qsa('[data-edit-client]').forEach(b => b.onclick = (e) => { e.stopPropagation(); openClientModal(b.dataset.editClient); });
+    qsa('[data-del-client]').forEach(b => b.onclick = (e) => {
+      e.stopPropagation();
+      const id = b.dataset.delClient;
+      const temCobranca = getCharges().some(ch => ch.clientId === id);
+      const msg = temCobranca
+        ? 'Este cliente tem cobranças lançadas. Excluir o cliente também vai apagar as cobranças dele. Confirma?'
+        : 'Excluir este cliente?';
+      if (confirm(msg)) {
+        saveClients(getClients().filter(c => c.id !== id));
+        saveCharges(getCharges().filter(ch => ch.clientId !== id));
+        renderClientes();
+      }
+    });
+    qsa('[data-row-client]').forEach(row => row.onclick = () => renderClienteDetalhe(row.dataset.rowClient));
+  }
+
+  qs('#cliBusca').oninput = (e) => { _clientesFiltro.busca = e.target.value; pintarLista(); };
+  qs('#cliStatus').onchange = (e) => { _clientesFiltro.status = e.target.value; pintarLista(); };
+  qs('#cliOrdem').onchange = (e) => { _clientesFiltro.ordem = e.target.value; pintarLista(); };
+  pintarLista();
 }
 
 function openClientModal(id, onSaved) {
@@ -1120,6 +1403,23 @@ function openClientModal(id, onSaved) {
       </div>
 
       <div class="field">
+        <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer;">
+          <input type="checkbox" id="cRecorrente" ${editing && editing.recorrente ? 'checked' : ''}>
+          <span>🔁 Lançar a mensalidade automaticamente todo mês</span>
+        </label>
+      </div>
+      <div class="field-row" id="cRecorrenciaRow" style="${editing && editing.recorrente ? '' : 'display:none;'}">
+        <div class="field">
+          <label class="field-label">Dia do vencimento (1 a 28)</label>
+          <input class="input" type="number" min="1" max="28" id="cDiaVenc" value="${editing && editing.diaVencimento ? editing.diaVencimento : 5}">
+        </div>
+        <div class="field">
+          <label class="field-label">Começar a lançar em</label>
+          <input class="input" type="month" id="cRecInicio" value="${editing && editing.recorrenciaInicio ? editing.recorrenciaInicio : todayISO().slice(0, 7)}">
+        </div>
+      </div>
+
+      <div class="field">
         <label class="field-label">Indicado por (opcional)</label>
         <select class="input" id="cIndicadoPor">
           <option value="">— ninguém / indicação externa —</option>
@@ -1159,6 +1459,9 @@ function openClientModal(id, onSaved) {
     qs('#cPlanoPersonalizadoRow').style.display = id === 'personalizado' ? '' : 'none';
     const plano = planoById(id);
     if (plano) qs('#cValorPlano').value = plano.valor;
+  };
+  qs('#cRecorrente').onchange = () => {
+    qs('#cRecorrenciaRow').style.display = qs('#cRecorrente').checked ? '' : 'none';
   };
   qs('#clientForm').onsubmit = (e) => {
     e.preventDefault();
@@ -1211,6 +1514,12 @@ function openClientModal(id, onSaved) {
       return;
     }
 
+    const recorrente = qs('#cRecorrente').checked;
+    if (recorrente && !(Number(valorPlanoRaw) > 0)) {
+      alert('Pra lançar a mensalidade todo mês, informe o valor do plano (R$/mês).');
+      return;
+    }
+
     const indicadoPor = qs('#cIndicadoPor').value;
     if (editing && indicadoPor === editing.id) {
       alert('Um cliente não pode ser indicado por ele mesmo.');
@@ -1232,7 +1541,10 @@ function openClientModal(id, onSaved) {
       plano: planoNome,
       valorPlano: valorPlanoRaw === '' ? null : Number(valorPlanoRaw),
       indicadoPor: indicadoPor || null,
-      indicadoPorTexto: qs('#cIndicadoPorTexto').value.trim()
+      indicadoPorTexto: qs('#cIndicadoPorTexto').value.trim(),
+      recorrente,
+      diaVencimento: diaVencimentoValido(qs('#cDiaVenc').value),
+      recorrenciaInicio: qs('#cRecInicio').value || todayISO().slice(0, 7)
     };
     if (editing) {
       const idx = clients.findIndex(c => c.id === editing.id);
@@ -1303,6 +1615,7 @@ function renderClienteDetalhe(clientId) {
         <div class="stat-label">Plano</div>
         <div class="stat-value" style="font-size:16px;">${client.plano ? escapeHtml(client.plano) : '—'}</div>
         ${client.valorPlano != null ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(client.valorPlano)}/mês</div>` : ''}
+        ${client.recorrente ? `<div class="view-desc" style="margin-top:4px;">🔁 Lançamento automático, vence dia ${diaVencimentoValido(client.diaVencimento)}</div>` : ''}
       </div>
       <div class="stat-card">
         <div class="stat-label">Indicado por</div>
@@ -1312,6 +1625,11 @@ function renderClienteDetalhe(clientId) {
         <div class="stat-label">Indicações feitas</div>
         <div class="stat-value emerald" style="font-size:16px;">${indicados.length}</div>
         ${descontoTotal > 0 ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(descontoTotal)} em desconto acumulado</div>` : ''}
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Mensalidades isentas</div>
+        <div class="stat-value emerald" style="font-size:16px;">${Number(client.isencoesDisponiveis) || 0} disponível(is)</div>
+        <div class="view-desc" style="margin-top:4px;">${Number(client.isencoesGanhas) || 0} ganha(s) · ${Number(client.isencoesUsadas) || 0} usada(s)</div>
       </div>
     </div>
     ${indicados.length > 0 ? `
@@ -1372,7 +1690,7 @@ function renderClienteDetalhe(clientId) {
 
     <div class="section-title">Cobranças deste cliente</div>
     <div style="margin-bottom:30px;">
-      ${charges.length === 0 ? emptyState('Nenhuma cobrança', 'Ainda não há cobranças lançadas para este cliente.') : renderChargeLedger(charges, { compact: false })}
+      ${charges.length === 0 ? emptyState('Nenhuma cobrança', 'Ainda não há cobranças lançadas para este cliente.') : renderChargesComPagas(charges, { compact: false })}
     </div>
 
     <div class="section-title">Reuniões com este cliente</div>
@@ -1396,6 +1714,7 @@ function renderClienteDetalhe(clientId) {
     openChargeModal({
       clientId: client.id,
       descricao: `${d.label} (${d.meses} meses) — ${client.plano || 'plano'} com ${(d.desconto * 100).toFixed(0)}% de desconto`,
+      tipo: 'mensalidade',
       valor: calc.comDesconto
     }, () => renderClienteDetalhe(client.id));
   });
@@ -1470,14 +1789,41 @@ function renderCobrancas() {
         <div class="view-title">Cobranças</div>
         <div class="view-desc">Lance cobranças de clientes ou vendas avulsas (quem não é cliente fixo)</div>
       </div>
-      <button class="btn btn-primary" id="btnNovaCobranca">+ Nova cobrança</button>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-ghost" id="btnVerRecorrencias">🔁 Recorrências (${getClients().filter(c => c.recorrente).length})</button>
+        <button class="btn btn-primary" id="btnNovaCobranca">+ Nova cobrança</button>
+      </div>
     </div>
     ${charges.length === 0 ? emptyState('Nenhuma cobrança lançada', 'Clique em "Nova cobrança" para começar.') :
-      renderChargeLedger(charges, { compact: false })}
+      renderChargesComPagas(charges, { compact: false })}
   `;
 
   qs('#btnNovaCobranca').onclick = () => openChargeModal();
+  qs('#btnVerRecorrencias').onclick = () => { _servicosTab = 'mensalidades'; _mensSubtab = 'recorrentes'; navigate('servicos'); };
   bindChargeActions();
+}
+
+// Separa as cobranças: em aberto ficam à vista; as pagas "descem" pra uma
+// seção recolhida no fim da lista (ainda dá pra abrir, buscar, ver recibo etc.).
+function renderChargesComPagas(charges, opts = {}) {
+  const abertas = charges.filter(c => chargeStatus(c) !== 'pago')
+    .sort((a, b) => a.vencimento.localeCompare(b.vencimento));
+  const pagas = charges.filter(c => chargeStatus(c) === 'pago')
+    .sort((a, b) => (b.dataPagamento || b.vencimento).localeCompare(a.dataPagamento || a.vencimento));
+  const totalPagas = pagas.reduce((sum, c) => sum + Number(c.valor || 0), 0);
+
+  const blocoAbertas = abertas.length
+    ? renderChargeLedger(abertas, opts)
+    : emptyState('Tudo em dia', 'Nenhuma cobrança em aberto.');
+
+  const blocoPagas = pagas.length ? `
+    <details class="pagas-box">
+      <summary>✅ Cobranças pagas (${pagas.length}) · ${formatCurrency(totalPagas)}</summary>
+      <input type="search" class="input pagas-busca" placeholder="Buscar nas pagas (cliente, descrição...)">
+      <div class="pagas-lista">${renderChargeLedger(pagas, opts)}</div>
+    </details>` : '';
+
+  return blocoAbertas + blocoPagas;
 }
 
 function renderChargeLedger(charges, opts = {}) {
@@ -1490,11 +1836,12 @@ function renderChargeLedger(charges, opts = {}) {
         const temContato = !!(client || (c.avulsoTelefone && c.avulsoTelefone.length >= 10));
         const status = chargeStatus(c);
         const stampClass = { pago: 'stamp-pago', pendente: 'stamp-pendente', atrasado: 'stamp-atrasado' }[status];
-        const stampLabel = { pago: 'Pago', pendente: 'Pendente', atrasado: 'Atrasado' }[status];
+        const stampLabel = c.isenta ? 'Isenta' : { pago: 'Pago', pendente: 'Pendente', atrasado: 'Atrasado' }[status];
+        const podeIsentar = status !== 'pago' && c.tipo === 'mensalidade' && client && (Number(client.isencoesDisponiveis) || 0) > 0;
         return `
         <div class="ledger-row">
           <div class="ledger-main">
-            <div class="ledger-title">${escapeHtml(nomeExibicao)}${!client && c.avulsoNome ? ' <span class="avulso-tag">avulsa</span>' : ''}</div>
+            <div class="ledger-title">${escapeHtml(nomeExibicao)}${!client && c.avulsoNome ? ' <span class="avulso-tag">avulsa</span>' : ''}${c.recorrente ? ' <span class="avulso-tag">🔁 mensal</span>' : ''}</div>
             <div class="ledger-sub">${escapeHtml(c.descricao)} · vence ${formatDateBR(c.vencimento)}${status === 'pago' && c.formaPagamentoUsada ? ' · pago via ' + formaPagamentoLabel(c.formaPagamentoUsada) : ''}</div>
           </div>
           <span class="stamp-badge ${stampClass}">${stampLabel}</span>
@@ -1502,9 +1849,10 @@ function renderChargeLedger(charges, opts = {}) {
           <div class="ledger-actions">
             ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">Enviar</button>` : ''}
             ${status !== 'pago' ? `<button class="btn btn-ghost btn-sm" data-pay-charge="${c.id}">Marcar pago</button>` : ''}
-            ${status === 'pago' ? `<button class="btn btn-ghost btn-sm" data-recibo-charge="${c.id}">🧾 Recibo</button>` : ''}
-            ${status === 'pago' && c.comprovanteLink ? `<a class="btn btn-ghost btn-sm" href="${escapeHtml(c.comprovanteLink)}" target="_blank" rel="noopener">📎 Comprovante</a>` : ''}
-            ${status === 'pago' && !c.comprovanteLink ? `<button class="btn btn-ghost btn-sm" data-add-comprovante="${c.id}">📎 + Comprovante</button>` : ''}
+            ${podeIsentar ? `<button class="btn btn-ghost btn-sm" data-isentar-charge="${c.id}">🎁 Isentar</button>` : ''}
+            ${status === 'pago' && !c.isenta ? `<button class="btn btn-ghost btn-sm" data-recibo-charge="${c.id}">🧾 Recibo</button>` : ''}
+            ${status === 'pago' && !c.isenta && c.comprovanteLink ? `<a class="btn btn-ghost btn-sm" href="${escapeHtml(c.comprovanteLink)}" target="_blank" rel="noopener">📎 Comprovante</a>` : ''}
+            ${status === 'pago' && !c.isenta && !c.comprovanteLink ? `<button class="btn btn-ghost btn-sm" data-add-comprovante="${c.id}">📎 + Comprovante</button>` : ''}
             ${!opts.compact ? `<button class="btn btn-danger btn-sm" data-del-charge="${c.id}">Excluir</button>` : ''}
           </div>
         </div>`;
@@ -1514,8 +1862,15 @@ function renderChargeLedger(charges, opts = {}) {
 }
 
 function bindChargeActions() {
+  qsa('.pagas-busca').forEach(inp => inp.oninput = () => {
+    const termo = inp.value.trim().toLowerCase();
+    inp.parentElement.querySelectorAll('.ledger-row').forEach(row => {
+      row.style.display = row.textContent.toLowerCase().includes(termo) ? '' : 'none';
+    });
+  });
   qsa('[data-send-charge]').forEach(b => b.onclick = () => openWhatsappModal(b.dataset.sendCharge));
   qsa('[data-pay-charge]').forEach(b => b.onclick = () => openMarkPaidModal(b.dataset.payCharge));
+  qsa('[data-isentar-charge]').forEach(b => b.onclick = () => isentarCobranca(b.dataset.isentarCharge));
   qsa('[data-add-comprovante]').forEach(b => b.onclick = () => openComprovanteModal(b.dataset.addComprovante));
   qsa('[data-recibo-charge]').forEach(b => b.onclick = () => gerarReciboPDF(b.dataset.reciboCharge));
   qsa('[data-del-charge]').forEach(b => b.onclick = () => {
@@ -1592,7 +1947,9 @@ function openMarkPaidModal(chargeId) {
     charges[idx].comprovanteLink = link || null;
     charges[idx].formaPagamentoUsada = qs('#mpForma').value;
     saveCharges(charges);
+    const premiado = concederIsencaoPorIndicacao(charges[idx]);
     closeModal();
+    if (premiado) alert(`🎁 ${premiado} ganhou 1 mensalidade isenta por essa indicação! Ela será usada na próxima mensalidade recorrente dele(a) — ou use o botão "Isentar" numa mensalidade em aberto.`);
     navigate(currentView);
   };
 }
@@ -1731,6 +2088,14 @@ function openChargeModal(presets, onSaved) {
         </div>
       </div>
 
+      <div class="field" id="chRecRow" style="${modoAvulso ? 'display:none;' : ''}">
+        <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer;">
+          <input type="checkbox" id="chRecorrente">
+          <span>🔁 Repetir todo mês</span>
+        </label>
+        <div class="view-desc" id="chRecNote" style="margin-top:4px;"></div>
+      </div>
+
       <div class="field">
         <label class="field-label">Formas de pagamento aceitas nesta cobrança</label>
         <div class="payment-check-group">
@@ -1778,7 +2143,25 @@ function openChargeModal(presets, onSaved) {
     </form>
   `);
 
+  function atualizarRecorrenciaUI() {
+    const row = qs('#chRecRow');
+    if (!row) return;
+    const avulso = temClientes ? qs('#chTipo').value === 'avulso' : true;
+    const box = qs('#chRecorrente');
+    if (avulso) { row.style.display = 'none'; box.checked = false; return; }
+    row.style.display = '';
+    const cli = clientById(qs('#chCliente').value);
+    if (cli && cli.recorrente) {
+      box.checked = false; box.disabled = true;
+      qs('#chRecNote').textContent = `Este cliente já tem mensalidade automática (${formatCurrency(cli.valorPlano)}, vence todo dia ${diaVencimentoValido(cli.diaVencimento)}).`;
+    } else {
+      box.disabled = false;
+      qs('#chRecNote').textContent = 'As próximas cobranças serão lançadas sozinhas todo mês, com este valor e no mesmo dia do vencimento, a partir do mês que vem.';
+    }
+  }
+
   function atualizarHintPlano() {
+    atualizarRecorrenciaUI();
     const hintEl = qs('#chPlanoHint');
     if (!hintEl) return;
     const clienteSelect = qs('#chCliente');
@@ -1804,6 +2187,7 @@ function openChargeModal(presets, onSaved) {
       qs('#chCliente').required = !avulso;
       qs('#chAvulsoNome').required = avulso;
       if (!avulso) { qs('#chCliente').onchange = atualizarHintPlano; atualizarHintPlano(); }
+      atualizarRecorrenciaUI();
     };
   }
 
@@ -1844,15 +2228,48 @@ function openChargeModal(presets, onSaved) {
     const boletoCodigo = qs('#chBoletoCodigo').value.trim();
 
     const charges = getCharges();
+    const descricao = qs('#chDescricao').value.trim();
+    const valor = Number(qs('#chValor').value);
+    const vencimento = qs('#chVencimento').value;
+
+    // 🔁 Repetir todo mês: liga a recorrência no cliente e já registra esta
+    // cobrança como a mensalidade do mês, pra não duplicar com a automática.
+    let recExtra = {};
+    const querRecorrer = tipo !== 'avulso' && qs('#chRecorrente') && qs('#chRecorrente').checked;
+    if (querRecorrer) {
+      if (!(valor > 0)) { alert('Pra repetir todo mês, informe um valor maior que zero.'); return; }
+      const cli = clientById(extra.clientId);
+      const mesVenc = vencimento.slice(0, 7);
+      const mesHoje = todayISO().slice(0, 7);
+      const base = mesVenc > mesHoje ? mesVenc : mesHoje;
+      const diaVenc = diaVencimentoValido(Number(vencimento.slice(8, 10)));
+      saveClients(getClients().map(x => x.id === cli.id ? {
+        ...x,
+        recorrente: true,
+        valorPlano: valor,
+        plano: x.plano || descricao,
+        diaVencimento: diaVenc,
+        recorrenciaInicio: proximoMesISO(base),
+        recorrenciaUltimoMes: base
+      } : x));
+      const idRec = `rec-${cli.id}-${mesVenc}`;
+      recExtra = {
+        tipo: 'mensalidade', competencia: mesVenc, recorrente: true,
+        ...(charges.some(ch => ch.id === idRec) ? {} : { id: idRec })
+      };
+    }
+
     charges.push({
       id: uid(),
       ...extra,
-      descricao: qs('#chDescricao').value.trim(),
-      valor: Number(qs('#chValor').value),
-      vencimento: qs('#chVencimento').value,
+      descricao,
+      valor,
+      vencimento,
       status: 'pendente',
       dataPagamento: null,
       createdAt: todayISO(),
+      ...(presets.tipo ? { tipo: presets.tipo } : {}),
+      ...recExtra,
       formasPagamento,
       linkPagamentoCartao: cartaoLink || null,
       boletoLink: boletoLink || null,
@@ -2143,22 +2560,69 @@ function openSendWhatsappModal(title, client, defaultMsg, onSent) {
   };
 }
 
-// ---------- SERVIÇOS E ORÇAMENTOS ----------
+// ---------- SERVIÇOS, MENSALIDADES E ORÇAMENTOS (tela única com abas) ----------
 function renderServicos() {
   const servicos = getServicos();
-  const orcamentos = getOrcamentos().slice().reverse();
+  const planos = getMensalidades();
+  const recorrentes = getClients().filter(c => c.recorrente);
+  const receitaMensal = recorrentes.reduce((sum, c) => sum + (Number(c.valorPlano) || 0), 0);
+  const orcAbertos = getOrcamentos().filter(o => ['nao_enviado', 'enviado', 'aguardando_retorno'].includes(o.status || 'nao_enviado')).length;
 
   qs('#main').innerHTML = `
     <div class="view-header">
       <div>
         <div class="view-title">Serviços</div>
-        <div class="view-desc">Catálogo de serviços e gerador de orçamento pra mandar no WhatsApp</div>
+        <div class="view-desc">Catálogo, planos de suporte recorrentes e orçamentos — tudo num lugar só</div>
       </div>
-      <div style="display:flex; gap:8px; flex-wrap:wrap;">
-        <button class="btn btn-ghost" id="btnNovoServico">+ Novo serviço</button>
+    </div>
+
+    <div class="cards-grid">
+      <div class="stat-card">
+        <div class="stat-label">Serviços no catálogo</div>
+        <div class="stat-value">${servicos.length}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Planos de mensalidade</div>
+        <div class="stat-value">${planos.length}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Recorrente / mês</div>
+        <div class="stat-value emerald">${formatCurrency(receitaMensal)}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Orçamentos em aberto</div>
+        <div class="stat-value amber">${orcAbertos}</div>
+      </div>
+    </div>
+
+    <div class="tabs" role="tablist">
+      <button class="tab-btn ${_servicosTab === 'catalogo' ? 'active' : ''}" data-tab="catalogo" role="tab">Catálogo <span class="tab-count">${servicos.length}</span></button>
+      <button class="tab-btn ${_servicosTab === 'mensalidades' ? 'active' : ''}" data-tab="mensalidades" role="tab">Mensalidades <span class="tab-count">${planos.length}</span></button>
+      <button class="tab-btn ${_servicosTab === 'orcamentos' ? 'active' : ''}" data-tab="orcamentos" role="tab">Orçamentos <span class="tab-count">${getOrcamentos().length}</span></button>
+    </div>
+
+    <div id="tabContent"></div>
+  `;
+
+  qsa('.tab-btn').forEach(b => b.onclick = () => {
+    _servicosTab = b.dataset.tab;
+    renderServicos();
+  });
+
+  if (_servicosTab === 'mensalidades') renderTabMensalidades();
+  else if (_servicosTab === 'orcamentos') renderTabOrcamentos();
+  else renderTabCatalogo();
+}
+
+function renderTabCatalogo() {
+  const servicos = getServicos();
+
+  qs('#tabContent').innerHTML = `
+    <div class="tab-toolbar">
+      <div class="view-desc" style="margin:0;">Os serviços que você oferece e os preços de cada um</div>
+      <div class="tab-actions">
         ${servicos.length > 0 ? `<button class="btn btn-ghost" id="btnSyncServicos">🔄 Atualizar valores</button>` : ''}
-        <button class="btn btn-ghost" id="btnOrcamentoSimples">✏️ Orçamento simples</button>
-        <button class="btn btn-whatsapp" id="btnGerarOrcamento" ${servicos.length === 0 ? 'disabled title="Cadastre pelo menos um serviço primeiro"' : ''}>💬 Orçamento pelo catálogo</button>
+        <button class="btn btn-primary" id="btnNovoServico">+ Novo serviço</button>
       </div>
     </div>
 
@@ -2206,6 +2670,44 @@ function renderServicos() {
         `).join('')}
       </div>
     `}
+
+
+  `;
+
+  qs('#btnNovoServico').onclick = () => openServiceModal();
+  const btnSyncServicos = qs('#btnSyncServicos');
+  if (btnSyncServicos) btnSyncServicos.onclick = () => sincronizarServicosSugeridos();
+  qsa('[data-add-sugerido]').forEach(b => b.onclick = () => {
+    const s = SERVICOS_SUGERIDOS[Number(b.dataset.addSugerido)];
+    saveServicos([...getServicos(), { id: uid(), ...s }]);
+    renderServicos();
+  });
+  const btnTodos = qs('#btnAddTodosSugeridos');
+  if (btnTodos) btnTodos.onclick = () => {
+    saveServicos([...getServicos(), ...SERVICOS_SUGERIDOS.map(s => ({ id: uid(), ...s }))]);
+    renderServicos();
+  };
+  qsa('[data-edit-servico]').forEach(b => b.onclick = () => openServiceModal(b.dataset.editServico));
+  qsa('[data-del-servico]').forEach(b => b.onclick = () => {
+    if (confirm('Excluir este serviço do catálogo?')) {
+      saveServicos(getServicos().filter(s => s.id !== b.dataset.delServico));
+      renderServicos();
+    }
+  });
+}
+
+function renderTabOrcamentos() {
+  const servicos = getServicos();
+  const orcamentos = getOrcamentos().slice().reverse();
+
+  qs('#tabContent').innerHTML = `
+    <div class="tab-toolbar">
+      <div class="view-desc" style="margin:0;">Monte orçamentos e mande pelo WhatsApp</div>
+      <div class="tab-actions">
+        <button class="btn btn-ghost" id="btnOrcamentoSimples">✏️ Orçamento simples</button>
+        <button class="btn btn-whatsapp" id="btnGerarOrcamento" ${servicos.length === 0 ? 'disabled title="Cadastre pelo menos um serviço primeiro"' : ''}>💬 Orçamento pelo catálogo</button>
+      </div>
+    </div>
 
     <div class="section-title" style="display:flex; align-items:center; justify-content:space-between;">
       <span>Histórico de orçamentos</span>
@@ -2290,28 +2792,8 @@ function renderServicos() {
     `}
   `;
 
-  qs('#btnNovoServico').onclick = () => openServiceModal();
   qs('#btnGerarOrcamento').onclick = () => { if (servicos.length > 0) openOrcamentoModal(); };
   qs('#btnOrcamentoSimples').onclick = () => openOrcamentoSimplesModal();
-  const btnSyncServicos = qs('#btnSyncServicos');
-  if (btnSyncServicos) btnSyncServicos.onclick = () => sincronizarServicosSugeridos();
-  qsa('[data-add-sugerido]').forEach(b => b.onclick = () => {
-    const s = SERVICOS_SUGERIDOS[Number(b.dataset.addSugerido)];
-    saveServicos([...getServicos(), { id: uid(), ...s }]);
-    renderServicos();
-  });
-  const btnTodos = qs('#btnAddTodosSugeridos');
-  if (btnTodos) btnTodos.onclick = () => {
-    saveServicos([...getServicos(), ...SERVICOS_SUGERIDOS.map(s => ({ id: uid(), ...s }))]);
-    renderServicos();
-  };
-  qsa('[data-edit-servico]').forEach(b => b.onclick = () => openServiceModal(b.dataset.editServico));
-  qsa('[data-del-servico]').forEach(b => b.onclick = () => {
-    if (confirm('Excluir este serviço do catálogo?')) {
-      saveServicos(getServicos().filter(s => s.id !== b.dataset.delServico));
-      renderServicos();
-    }
-  });
   const btnViewLista = qs('#btnViewLista');
   const btnViewFunil = qs('#btnViewFunil');
   if (btnViewLista) btnViewLista.onclick = () => { _orcamentoView = 'lista'; renderServicos(); };
@@ -2710,21 +3192,96 @@ function openOrcamentoSimplesModal(editingId) {
 }
 
 // ---------- MENSALIDADES (planos de suporte) ----------
-function renderMensalidades() {
-  const mensalidades = getMensalidades();
+function renderBlocosRecorrenciaEIndicacao() {
+  const clients = getClients();
+  const recorrentes = clients.filter(c => c.recorrente);
+  const mesHoje = todayISO().slice(0, 7);
+  const totalMensal = recorrentes.reduce((sum, c) => sum + (Number(c.valorPlano) || 0), 0);
 
-  qs('#main').innerHTML = `
-    <div class="view-header">
-      <div>
-        <div class="view-title">Mensalidades</div>
-        <div class="view-desc">Planos de suporte recorrentes — usados no cadastro de cliente e nos orçamentos</div>
-      </div>
-      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+  const blocoRec = `
+    <div class="section-title">🔁 Mensalidades recorrentes (${recorrentes.length})</div>
+    <p class="view-desc" style="margin-bottom:12px;">
+      Clientes com lançamento automático: a cobrança do mês aparece sozinha em <b>Cobranças</b>.
+      ${recorrentes.length ? `Total previsto por mês: <b>${formatCurrency(totalMensal)}</b>.` : 'Pra ativar, edite o cliente e marque "Lançar a mensalidade automaticamente todo mês".'}
+    </p>
+    ${recorrentes.length === 0 ? '' : `
+      <div class="ledger" style="margin-bottom:30px;">
+        ${recorrentes.map(c => {
+          const cobMes = getCharges().find(ch => ch.id === `rec-${c.id}-${mesHoje}`);
+          const st = cobMes ? (cobMes.isenta ? 'Isenta' : { pago: 'Paga', pendente: 'Pendente', atrasado: 'Atrasada' }[chargeStatus(cobMes)]) : '—';
+          const cls = cobMes ? (cobMes.isenta ? 'stamp-pago' : { pago: 'stamp-pago', pendente: 'stamp-pendente', atrasado: 'stamp-atrasado' }[chargeStatus(cobMes)]) : 'stamp-pausado';
+          return `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(c.nome)}</div>
+              <div class="ledger-sub">${escapeHtml(c.plano || 'plano')} · vence todo dia ${diaVencimentoValido(c.diaVencimento)}${(Number(c.isencoesDisponiveis) || 0) > 0 ? ` · 🎁 ${c.isencoesDisponiveis} isenta(s) disponível(is)` : ''}</div>
+            </div>
+            <span class="stamp-badge ${cls}">${competenciaLabel(mesHoje)}: ${st}</span>
+            <div class="ledger-value">${formatCurrency(c.valorPlano)}</div>
+            <div class="ledger-actions">
+              <button class="btn btn-ghost btn-sm" data-view-client="${c.id}">Ver</button>
+              <button class="btn btn-ghost btn-sm" data-pausar-recorrencia="${c.id}">Pausar</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`}`;
+
+  const indicados = clients.filter(c => c.indicadoPor && clientById(c.indicadoPor));
+  const premiadas = indicados.filter(c => c.indicacaoPremiada).length;
+  const blocoInd = `
+    <div class="section-title">🎁 Indicações (${indicados.length})</div>
+    <p class="view-desc" style="margin-bottom:12px;">
+      Quando o cliente indicado paga a <b>1ª mensalidade</b>, quem indicou ganha <b>1 mensalidade isenta</b>.
+      ${indicados.length ? `${premiadas} já premiada(s), ${indicados.length - premiadas} aguardando.` : 'Pra registrar, escolha "Indicado por" no cadastro do cliente indicado.'}
+    </p>
+    ${indicados.length === 0 ? '' : `
+      <div class="ledger" style="margin-bottom:30px;">
+        ${indicados.map(c => {
+          const indicador = clientById(c.indicadoPor);
+          return `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(c.nome)} <span class="avulso-tag">indicado por ${escapeHtml(indicador.nome)}</span></div>
+              <div class="ledger-sub">${c.indicacaoPremiada ? 'Isenção concedida em ' + formatDateBR(c.indicacaoPremiadaEm) : 'Aguardando o pagamento da 1ª mensalidade'}</div>
+            </div>
+            <span class="stamp-badge ${c.indicacaoPremiada ? 'stamp-pago' : 'stamp-pendente'}">${c.indicacaoPremiada ? '🎁 Premiada' : 'Aguardando'}</span>
+            <div class="ledger-actions">
+              <button class="btn btn-ghost btn-sm" data-view-client="${c.id}">Ver</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`}`;
+
+  return { rec: blocoRec, ind: blocoInd, nRec: recorrentes.length, nInd: indicados.length };
+}
+
+// Mantida por compatibilidade: abre a aba Mensalidades dentro da tela única.
+function renderMensalidades() {
+  _servicosTab = 'mensalidades';
+  renderServicos();
+}
+
+function renderTabMensalidades() {
+  const mensalidades = getMensalidades();
+  const blocos = renderBlocosRecorrenciaEIndicacao();
+
+  qs('#tabContent').innerHTML = `
+    <div class="subtabs">
+      <button class="subtab-btn ${_mensSubtab === 'planos' ? 'active' : ''}" data-subtab="planos">Planos <span class="tab-count">${mensalidades.length}</span></button>
+      <button class="subtab-btn ${_mensSubtab === 'recorrentes' ? 'active' : ''}" data-subtab="recorrentes">🔁 Recorrentes <span class="tab-count">${blocos.nRec}</span></button>
+      <button class="subtab-btn ${_mensSubtab === 'indicacoes' ? 'active' : ''}" data-subtab="indicacoes">🎁 Indicações <span class="tab-count">${blocos.nInd}</span></button>
+    </div>
+
+    ${_mensSubtab === 'recorrentes' ? blocos.rec : _mensSubtab === 'indicacoes' ? blocos.ind : `
+    <div class="tab-toolbar">
+      <div class="view-desc" style="margin:0;">Planos de suporte recorrentes — usados no cadastro de cliente e nos orçamentos</div>
+      <div class="tab-actions">
         ${mensalidades.length > 0 ? `<button class="btn btn-ghost" id="btnSyncMensalidades">🔄 Atualizar valores</button>` : ''}
         <button class="btn btn-primary" id="btnNovaMensalidade">+ Novo plano</button>
       </div>
     </div>
 
+    ${mensalidades.length > 0 ? `<div class="section-title">Planos de mensalidade</div>` : ``}
     ${mensalidades.length === 0 ? `
       <div class="section-title">Planos sugeridos</div>
       <p class="view-desc" style="margin-bottom:14px;">
@@ -2764,9 +3321,20 @@ function renderMensalidades() {
       </div>
       <button class="btn btn-ghost btn-sm" style="margin-top:14px;" id="btnAddSugeridasExtra">+ Ver planos sugeridos que faltam</button>
     `}
+
+    `}
   `;
 
-  qs('#btnNovaMensalidade').onclick = () => openMensalidadeModal();
+  qsa('.subtab-btn').forEach(b => b.onclick = () => { _mensSubtab = b.dataset.subtab; renderServicos(); });
+  const btnNovaMensalidade = qs('#btnNovaMensalidade');
+  if (btnNovaMensalidade) btnNovaMensalidade.onclick = () => openMensalidadeModal();
+  qsa('[data-view-client]').forEach(b => b.onclick = () => renderClienteDetalhe(b.dataset.viewClient));
+  qsa('[data-pausar-recorrencia]').forEach(b => b.onclick = () => {
+    const c = clientById(b.dataset.pausarRecorrencia);
+    if (!c || !confirm(`Pausar o lançamento automático da mensalidade de ${c.nome}? As cobranças já lançadas continuam. Pra voltar, é só marcar de novo na edição do cliente.`)) return;
+    saveClients(getClients().map(x => x.id === c.id ? { ...x, recorrente: false } : x));
+    renderMensalidades();
+  });
   const btnSyncMensalidades = qs('#btnSyncMensalidades');
   if (btnSyncMensalidades) btnSyncMensalidades.onclick = () => sincronizarMensalidadesSugeridas();
   qsa('[data-add-mensalidade-sugerida]').forEach(b => b.onclick = () => {
@@ -2861,6 +3429,223 @@ function openMensalidadeModal(id) {
   };
 }
 
+// ---------- SAÍDAS ----------
+// Registro de tudo que sai do caixa. O "recebido" vem das cobranças já pagas
+// (as vendas), então o saldo = o que entrou − o que você registrou aqui.
+const CATEGORIAS_SAIDA = [
+  'Hospedagem e domínio',
+  'Ferramentas e assinaturas',
+  'Comissão de parceria',
+  'Impostos e taxas',
+  'Marketing',
+  'Equipamentos',
+  'Retirada pessoal',
+  'Outros'
+];
+let _saidasPeriodo = null; // 'AAAA-MM' (sempre um mês específico)
+
+function hojeLocalISO() { return todayISO(); }
+function mesAnteriorISO(mes) {
+  let [a, m] = mes.split('-').map(Number);
+  m--;
+  if (m < 1) { m = 12; a--; }
+  return `${a}-${String(m).padStart(2, '0')}`;
+}
+// cobranças pagas dentro do mês (pela data em que o dinheiro entrou)
+function recebidosDoMes(mes) {
+  return getCharges()
+    .filter(c => c.status === 'pago' && !c.isenta && (c.dataPagamento || '').slice(0, 7) === mes)
+    .sort((a, b) => (b.dataPagamento || '').localeCompare(a.dataPagamento || ''));
+}
+function totalRecebidoPeriodo(mes) {
+  return recebidosDoMes(mes).reduce((s, c) => s + Number(c.valor || 0), 0);
+}
+
+function renderSaidas() {
+  const mesAtual = hojeLocalISO().slice(0, 7);
+  if (!_saidasPeriodo || _saidasPeriodo === 'tudo') _saidasPeriodo = mesAtual;
+  const periodo = _saidasPeriodo;
+
+  const todas = getSaidas();
+  const doPeriodo = todas
+    .filter(s => (s.data || '').slice(0, 7) === periodo)
+    .sort((a, b) => (b.data || '').localeCompare(a.data || ''));
+
+  const recebimentos = recebidosDoMes(periodo);
+  const entradas = recebimentos.reduce((s, c) => s + Number(c.valor || 0), 0);
+  const saidas = doPeriodo.reduce((s, x) => s + Number(x.valor || 0), 0);
+  const saldo = entradas - saidas;
+  const pct = entradas > 0 ? Math.round(saidas / entradas * 100) : (saidas > 0 ? 100 : 0);
+  const classePct = pct <= 60 ? 'ok' : (pct <= 90 ? 'alerta' : 'perigo');
+
+  const porCategoria = {};
+  doPeriodo.forEach(s => { const k = s.categoria || 'Outros'; porCategoria[k] = (porCategoria[k] || 0) + Number(s.valor || 0); });
+  const categorias = Object.entries(porCategoria).sort((a, b) => b[1] - a[1]);
+
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Saídas</div>
+        <div class="view-desc">Cada mês é separado: o que saiu, comparado com o que você recebeu das vendas naquele mês</div>
+      </div>
+      <button class="btn btn-primary" id="btnNovaSaida">+ Nova saída</button>
+    </div>
+
+    <div class="periodo-nav">
+      <button class="btn btn-ghost btn-sm" id="perAnt" aria-label="Mês anterior">‹</button>
+      <div class="periodo-label">${mesAnoLabel(periodo)}</div>
+      <button class="btn btn-ghost btn-sm" id="perProx" ${periodo >= mesAtual ? 'disabled' : ''} aria-label="Próximo mês">›</button>
+      ${periodo !== mesAtual ? '<button class="btn btn-ghost btn-sm" id="perHoje">Mês atual</button>' : ''}
+    </div>
+
+    <div class="cards-grid">
+      <div class="stat-card">
+        <div class="stat-label">Recebido em ${mesAnoLabel(periodo)}</div>
+        <div class="stat-value emerald">${formatCurrency(entradas)}</div>
+        <div class="stat-sub">${recebimentos.length} pagamento${recebimentos.length === 1 ? '' : 's'} no mês</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Saídas</div>
+        <div class="stat-value brick">${formatCurrency(saidas)}</div>
+        <div class="stat-sub">${doPeriodo.length} lançamento${doPeriodo.length === 1 ? '' : 's'}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Saldo</div>
+        <div class="stat-value ${saldo >= 0 ? 'emerald' : 'brick'}">${formatCurrency(saldo)}</div>
+        <div class="stat-sub">${saldo >= 0 ? 'sobrou do que entrou no mês' : 'saiu mais do que entrou no mês'}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Já saiu do recebido</div>
+        <div class="stat-value">${pct}%</div>
+        <div class="gasto-bar"><div class="gasto-bar-fill ${classePct}" style="width:${Math.min(pct, 100)}%;"></div></div>
+      </div>
+    </div>
+
+    <details class="entradas-box">
+      <summary>💰 O que entrou em ${mesAnoLabel(periodo)} (${recebimentos.length}) — ${formatCurrency(entradas)}</summary>
+      ${recebimentos.length === 0 ? '<div class="view-desc" style="padding:10px 4px;">Nenhum pagamento recebido neste mês.</div>' : `
+      <div class="ledger" style="margin-top:10px;">
+        ${recebimentos.map(c => {
+          const cli = c.clientId ? clientById(c.clientId) : null;
+          return `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(cli ? cli.nome : (c.avulsoNome || 'Cliente removido'))}</div>
+              <div class="ledger-sub">${escapeHtml(c.descricao)} · pago em ${formatDateBR(c.dataPagamento)}</div>
+            </div>
+            <div class="ledger-value" style="color:var(--emerald);">+ ${formatCurrency(c.valor)}</div>
+          </div>`;
+        }).join('')}
+      </div>`}
+    </details>
+
+    ${categorias.length > 0 ? `
+      <div class="section-title">Para onde foi o dinheiro</div>
+      <div class="cat-list">
+        ${categorias.map(([nome, valor]) => `
+          <div class="cat-row">
+            <div class="cat-row-top"><span>${escapeHtml(nome)}</span><span class="cat-valor">${formatCurrency(valor)} · ${saidas > 0 ? Math.round(valor / saidas * 100) : 0}%</span></div>
+            <div class="gasto-bar"><div class="gasto-bar-fill neutro" style="width:${saidas > 0 ? Math.round(valor / saidas * 100) : 0}%;"></div></div>
+          </div>`).join('')}
+      </div>
+    ` : ''}
+
+    <div class="section-title">Lançamentos</div>
+    ${doPeriodo.length === 0
+      ? emptyState('Nenhuma saída neste mês', 'Clique em "Nova saída" pra registrar um gasto.')
+      : `
+      <div class="ledger">
+        ${doPeriodo.map(s => `
+          <div class="ledger-row">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(s.descricao)} <span class="avulso-tag">${escapeHtml(s.categoria || 'Outros')}</span></div>
+              <div class="ledger-sub">${formatDateBR(s.data)}${s.observacoes ? ' · ' + escapeHtml(s.observacoes) : ''}</div>
+            </div>
+            <div class="ledger-value saida-valor">− ${formatCurrency(s.valor)}</div>
+            <div class="ledger-actions">
+              <button class="btn btn-ghost btn-sm" data-edit-saida="${s.id}">Editar</button>
+              <button class="btn btn-danger btn-sm" data-del-saida="${s.id}">Excluir</button>
+            </div>
+          </div>`).join('')}
+      </div>`}
+  `;
+
+  qs('#btnNovaSaida').onclick = () => openSaidaModal();
+  qs('#perAnt').onclick = () => { _saidasPeriodo = mesAnteriorISO(periodo); renderSaidas(); };
+  qs('#perProx').onclick = () => { _saidasPeriodo = proximoMesISO(periodo); renderSaidas(); };
+  const perHoje = qs('#perHoje');
+  if (perHoje) perHoje.onclick = () => { _saidasPeriodo = mesAtual; renderSaidas(); };
+  qsa('[data-edit-saida]').forEach(b => b.onclick = () => openSaidaModal(b.dataset.editSaida));
+  qsa('[data-del-saida]').forEach(b => b.onclick = () => {
+    if (confirm('Excluir esta saída?')) {
+      saveSaidas(getSaidas().filter(s => s.id !== b.dataset.delSaida));
+      renderSaidas();
+    }
+  });
+}
+
+function openSaidaModal(id) {
+  const editing = id ? getSaidas().find(s => s.id === id) : null;
+  openModal(`
+    <div class="modal-title">${editing ? 'Editar saída' : 'Nova saída'}</div>
+    <form id="saidaForm">
+      <div class="field">
+        <label class="field-label">Descrição</label>
+        <input class="input" id="sdDescricao" required placeholder="Ex: Domínio do site da Ana, assinatura do Canva..." value="${editing ? escapeHtml(editing.descricao) : ''}">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Valor (R$)</label>
+          <input class="input" id="sdValor" type="number" min="0.01" step="0.01" required value="${editing ? Number(editing.valor).toFixed(2) : ''}">
+        </div>
+        <div class="field">
+          <label class="field-label">Data</label>
+          <input class="input" id="sdData" type="date" required value="${editing ? editing.data : hojeLocalISO()}">
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Categoria</label>
+        <select class="input" id="sdCategoria">
+          ${CATEGORIAS_SAIDA.map(c => `<option value="${c}" ${(editing ? editing.categoria : '') === c ? 'selected' : ''}>${c}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label class="field-label">Observações (opcional)</label>
+        <textarea class="input" id="sdObs" style="min-height:60px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.observacoes || '') : ''}</textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnCancelSaida">Cancelar</button>
+        <button type="submit" class="btn btn-primary">${editing ? 'Salvar' : 'Registrar saída'}</button>
+      </div>
+    </form>
+  `);
+  qs('#btnCancelSaida').onclick = closeModal;
+  qs('#saidaForm').onsubmit = (e) => {
+    e.preventDefault();
+    const valor = Number(qs('#sdValor').value);
+    if (!(valor > 0)) { alert('Informe um valor maior que zero.'); return; }
+    const data = {
+      descricao: qs('#sdDescricao').value.trim(),
+      valor,
+      data: qs('#sdData').value,
+      categoria: qs('#sdCategoria').value,
+      observacoes: qs('#sdObs').value.trim()
+    };
+    const lista = getSaidas().slice();
+    if (editing) {
+      const idx = lista.findIndex(s => s.id === editing.id);
+      lista[idx] = { ...editing, ...data };
+    } else {
+      lista.push({ id: uid(), criadoEm: todayISO(), ...data });
+    }
+    saveSaidas(lista);
+    // se a saída é de outro mês, mostra o mês dela pra ela não "sumir"
+    _saidasPeriodo = data.data.slice(0, 7);
+    closeModal();
+    renderSaidas();
+  };
+}
+
 // ---------- NEGOCIAÇÕES (parcerias com colaboradora(s)) ----------
 // Aqui você registra, por projeto/cliente, o valor de contratação (pago
 // uma vez), a mensalidade (recorrente) e o percentual que a pessoa que te
@@ -2930,38 +3715,73 @@ function renderNegociacoes() {
       </div>
     ` : ''}
 
-    ${negociacoes.length === 0 ? emptyState('Nenhuma negociação registrada', 'Registre um projeto em parceria: escolha o cliente, o valor de contratação, a mensalidade e o percentual que a colaboradora recebe.') : `
-      <div class="ledger">
-        ${negociacoes.map(n => {
-          const cliente = clientById(n.clienteId);
-          const cComissao = comissaoContratacao(n);
-          const mComissao = comissaoMensal(n);
-          const mensalidadePaga = mensalidadeEstaPagaEsteMes(n);
-          return `
-          <div class="ledger-row">
-            <div class="ledger-main">
-              <div class="ledger-title">${escapeHtml(cliente ? cliente.nome : 'Cliente removido')}</div>
-              <div class="ledger-sub">${escapeHtml(n.colaboradora)} · ${Number(n.percentual) || 0}% de comissão</div>
-              <div class="ledger-sub" style="margin-top:4px;">
-                Contratação: ${formatCurrency(n.valorContratacao)} → comissão ${formatCurrency(cComissao)} (uma vez)
-                ${n.contratacaoPaga ? '<span class="stamp-badge stamp-pago" style="margin-left:6px;">paga</span>' : (Number(n.valorContratacao) > 0 ? '<span class="stamp-badge stamp-pendente" style="margin-left:6px;">pendente</span>' : '')}
-              </div>
-              <div class="ledger-sub">
-                Mensalidade: ${formatCurrency(n.valorMensalidade)}/mês → comissão ${formatCurrency(mComissao)}/mês
-                ${Number(n.valorMensalidade) > 0 ? `<span class="stamp-badge ${mensalidadePaga ? 'stamp-pago' : 'stamp-pendente'}" style="margin-left:6px;">${mensalidadePaga ? mesAnoLabel(mesAtualISO()) + ' paga' : mesAnoLabel(mesAtualISO()) + ' pendente'}</span>` : ''}
-              </div>
-              ${n.observacoes ? `<div class="ledger-sub" style="margin-top:4px;">${escapeHtml(n.observacoes)}</div>` : ''}
+    ${negociacoes.length === 0 ? emptyState('Nenhuma negociação registrada', 'Registre um projeto em parceria: escolha o cliente, o valor de contratação, a mensalidade e o percentual que a colaboradora recebe.') : (() => {
+      const grupos = new Map();
+      negociacoes.forEach(n => {
+        const nome = (n.colaboradora || 'Sem nome').trim();
+        const chave = nome.toLowerCase();
+        if (!grupos.has(chave)) grupos.set(chave, { nome, itens: [] });
+        grupos.get(chave).itens.push(n);
+      });
+      const mesLabel = mesAnoLabel(mesAtualISO());
+      return Array.from(grupos.values()).sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR')).map(g => {
+        const recMes = g.itens.reduce((s, n) => s + comissaoMensal(n), 0);
+        const pendente =
+          g.itens.filter(n => !n.contratacaoPaga).reduce((s, n) => s + comissaoContratacao(n), 0) +
+          g.itens.filter(n => Number(n.valorMensalidade) > 0 && !mensalidadeEstaPagaEsteMes(n)).reduce((s, n) => s + comissaoMensal(n), 0);
+        return `
+        <div class="neg-group">
+          <div class="neg-group-head">
+            <div>
+              <div class="neg-group-name">${escapeHtml(g.nome)}</div>
+              <div class="ledger-sub">${g.itens.length} projeto${g.itens.length > 1 ? 's' : ''}</div>
             </div>
-            <div class="ledger-actions">
-              ${Number(n.valorContratacao) > 0 ? `<button class="btn btn-ghost btn-sm" data-toggle-paga-negociacao="${n.id}">${n.contratacaoPaga ? 'Contratação: marcar pendente' : 'Contratação: marcar paga'}</button>` : ''}
-              ${Number(n.valorMensalidade) > 0 ? `<button class="btn btn-ghost btn-sm" data-toggle-mensalidade-negociacao="${n.id}">${mensalidadePaga ? 'Mensalidade: desmarcar' : 'Mensalidade: marcar paga (' + mesAnoLabel(mesAtualISO()) + ')'}</button>` : ''}
-              <button class="btn btn-ghost btn-sm" data-edit-negociacao="${n.id}">Editar</button>
-              <button class="btn btn-danger btn-sm" data-del-negociacao="${n.id}">Excluir</button>
+            <div class="neg-group-totais">
+              <span class="stamp-badge stamp-pausado">${formatCurrency(recMes)}/mês recorrente</span>
+              <span class="stamp-badge ${pendente > 0 ? 'stamp-pendente' : 'stamp-pago'}">${pendente > 0 ? formatCurrency(pendente) + ' a pagar agora' : 'tudo em dia'}</span>
             </div>
-          </div>`;
-        }).join('')}
-      </div>
-    `}
+          </div>
+          <div class="ledger">
+            ${g.itens.map(n => {
+              const cliente = clientById(n.clienteId);
+              const temContr = Number(n.valorContratacao) > 0;
+              const temMens = Number(n.valorMensalidade) > 0;
+              const mensalidadePaga = mensalidadeEstaPagaEsteMes(n);
+              return `
+              <div class="ledger-row neg-row">
+                <div class="neg-client">
+                  <div class="ledger-title">${escapeHtml(cliente ? cliente.nome : 'Cliente removido')}</div>
+                  <div class="ledger-sub">${Number(n.percentual) || 0}% de comissão</div>
+                  ${n.observacoes ? `<div class="ledger-sub" style="margin-top:4px;">${escapeHtml(n.observacoes)}</div>` : ''}
+                </div>
+                <div class="neg-col">
+                  <div class="neg-col-label">Contratação (uma vez)</div>
+                  ${temContr ? `
+                    <div class="neg-col-valor">${formatCurrency(comissaoContratacao(n))} <span class="neg-col-base">de ${formatCurrency(n.valorContratacao)}</span></div>
+                    <div class="neg-col-acao">
+                      <span class="stamp-badge ${n.contratacaoPaga ? 'stamp-pago' : 'stamp-pendente'}">${n.contratacaoPaga ? 'paga' : 'pendente'}</span>
+                      <button class="btn btn-ghost btn-sm" data-toggle-paga-negociacao="${n.id}">${n.contratacaoPaga ? 'Desfazer' : 'Marcar paga'}</button>
+                    </div>` : '<div class="neg-col-vazio">—</div>'}
+                </div>
+                <div class="neg-col">
+                  <div class="neg-col-label">Mensalidade (${mesLabel})</div>
+                  ${temMens ? `
+                    <div class="neg-col-valor">${formatCurrency(comissaoMensal(n))}/mês <span class="neg-col-base">de ${formatCurrency(n.valorMensalidade)}</span></div>
+                    <div class="neg-col-acao">
+                      <span class="stamp-badge ${mensalidadePaga ? 'stamp-pago' : 'stamp-pendente'}">${mensalidadePaga ? 'paga' : 'pendente'}</span>
+                      <button class="btn btn-ghost btn-sm" data-toggle-mensalidade-negociacao="${n.id}">${mensalidadePaga ? 'Desfazer' : 'Marcar paga'}</button>
+                    </div>` : '<div class="neg-col-vazio">—</div>'}
+                </div>
+                <div class="ledger-actions">
+                  <button class="btn btn-ghost btn-sm" data-edit-negociacao="${n.id}">Editar</button>
+                  <button class="btn btn-danger btn-sm" data-del-negociacao="${n.id}">Excluir</button>
+                </div>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>`;
+      }).join('');
+    })()}
   `;
 
   qs('#btnNovaNegociacao').onclick = () => openNegociacaoModal();
