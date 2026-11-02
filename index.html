@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Caixa Aberto — Controle financeiro de clientes</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#171F1B">
+<link rel="icon" href="assets/images/icon-192.png">
+<link rel="apple-touch-icon" href="assets/images/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- TELA DE ACESSO -->
+  <div id="lockScreen" class="lock-screen">
+    <div class="lock-card">
+      <div class="stamp-mark">CA</div>
+      <h1 class="lock-title">Caixa Aberto</h1>
+      <p class="lock-sub" id="lockSubtitle">Entre com seu e-mail e senha.</p>
+      <form id="lockForm">
+        <input type="email" id="lockEmail" class="input" placeholder="E-mail" autocomplete="email" required>
+        <input type="password" id="lockPassword" class="input" placeholder="Senha (mínimo 6 caracteres)" autocomplete="current-password" minlength="6" required>
+        <input type="password" id="lockPasswordConfirm" class="input hidden" placeholder="Confirme a senha" autocomplete="new-password">
+        <button type="submit" class="btn btn-primary btn-block" id="lockSubmit">Entrar</button>
+      </form>
+      <button type="button" class="lock-link" id="lockSwitchMode">Ainda não tenho conta — criar conta</button>
+      <button type="button" class="lock-link" id="lockForgot">Esqueci minha senha</button>
+      <p class="lock-note">Seus dados ficam salvos com segurança na nuvem (Firebase/Google), na sua conta. Você pode entrar com este e-mail e senha em qualquer aparelho.</p>
+      <p class="lock-error hidden" id="lockError"></p>
+    </div>
+  </div>
+
+  <!-- APP -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="brand">
+          <div class="stamp-mark small">CA</div>
+          <div>
+            <div class="brand-name">Caixa Aberto</div>
+            <div class="brand-sub" id="brandEmpresa">seu financeiro</div>
+          </div>
+        </div>
+        <button class="theme-toggle" id="themeToggle" aria-label="Alternar tema" title="Alternar modo claro/escuro">🌙</button>
+        <button class="nav-toggle" id="navToggle" aria-label="Abrir menu">
+          <span class="nav-toggle-icon"></span>
+        </button>
+      </div>
+      <div class="sidebar-menu" id="sidebarMenu">
+        <nav class="nav">
+          <button class="nav-btn active" data-view="dashboard">Painel</button>
+          <button class="nav-btn" data-view="clientes">Clientes</button>
+          <button class="nav-btn" data-view="calculadora">Calculadora</button>
+          <button class="nav-btn" data-view="cobrancas">Cobranças</button>
+          <button class="nav-btn" data-view="saidas">Saídas</button>
+          <button class="nav-btn" data-view="agenda">Agenda</button>
+          <button class="nav-btn" data-view="servicos">Serviços</button>
+          <button class="nav-btn" data-view="negociacoes">Negociações</button>
+          <button class="nav-btn" data-view="contratos">Contratos</button>
+          <button class="nav-btn" data-view="relatorios">Relatórios</button>
+          <button class="nav-btn" data-view="config">Configurações</button>
+        </nav>
+        <button class="btn-logout" id="btnLogout">Sair</button>
+      </div>
+    </aside>
+    <main id="main" class="main"></main>
+  </div>
+
+  <div id="modalRoot"></div>
+
+  <!-- pdf-lib (geração de recibos em PDF direto no navegador) -->
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+
+  <!-- PizZip + docxtemplater (preenchimento do modelo de contrato .docx) -->
+  <script src="https://unpkg.com/pizzip@3.1.6/dist/pizzip.min.js"></script>
+  <script src="https://unpkg.com/docxtemplater@3.44.0/build/docxtemplater.js"></script>
+
+  <!-- html2pdf.js (exportar o contrato preenchido também em PDF) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+  <!-- Firebase (compat SDK — mais simples de usar sem processo de build) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+  <script src="firebase-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
