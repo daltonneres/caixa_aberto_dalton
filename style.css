@@ -915,3 +915,35 @@ button:focus-visible, .nav-btn:focus-visible, input:focus-visible{
 .pix-qr-img{width:240px; max-width:100%; height:auto; image-rendering:pixelated; background:#fff; padding:6px; border-radius:10px; border:1.5px solid var(--line);}
 .pix-qr-valor{font-family:var(--font-mono); font-size:20px; font-weight:600; color:var(--ink);}
 .pix-code{font-family:var(--font-mono); font-size:11px; word-break:break-all; min-height:84px;}
+
+
+/* ---------- CALENDÁRIO DA AGENDA ---------- */
+.cal-card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:18px; }
+.cal-head { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+.cal-titulo { flex:1; text-align:center; font-family:var(--font-display); font-size:18px; font-weight:600; }
+.cal-grid { display:grid; grid-template-columns:repeat(7, minmax(0, 1fr)); gap:4px; }
+.cal-dow { text-align:center; font-size:11px; font-weight:600; color:var(--ink-soft); padding:4px 0; text-transform:uppercase; letter-spacing:.04em; }
+.cal-cell { min-height:58px; border:1px solid var(--line); border-radius:8px; background:var(--paper); color:var(--ink);
+  display:flex; flex-direction:column; align-items:flex-start; justify-content:space-between; padding:5px 6px; cursor:pointer; font-family:var(--font-body); text-align:left; }
+.cal-cell:hover { border-color:var(--emerald); }
+.cal-vazio { border:none; background:transparent; cursor:default; }
+.cal-hoje .cal-num { background:var(--emerald); color:#fff; border-radius:50%; width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; }
+.cal-sel { border-color:var(--emerald); box-shadow:0 0 0 2px var(--emerald-bg); background:var(--emerald-bg); }
+.cal-num { font-size:13px; font-weight:600; }
+.cal-dots { display:flex; flex-wrap:wrap; gap:3px; align-items:center; }
+.cal-dot { display:inline-block; width:8px; height:8px; border-radius:50%; }
+.cal-dot.reuniao { background:var(--emerald); }
+.cal-dot.reuniao-feita { background:var(--emerald); opacity:.4; }
+.cal-dot.venc-pendente { background:var(--amber); }
+.cal-dot.venc-atrasado { background:var(--brick); }
+.cal-dot.venc-pago { background:transparent; border:2px solid var(--ink-soft); width:8px; height:8px; box-sizing:border-box; }
+.cal-mais { font-size:10px; color:var(--ink-soft); }
+.cal-legenda { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:12px; font-size:12px; color:var(--ink-soft); align-items:center; }
+.cal-legenda i { margin-right:4px; vertical-align:middle; }
+.cal-total { margin-left:auto; color:var(--ink); }
+.cal-dia-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:6px 0 8px; flex-wrap:wrap; }
+@media (max-width: 600px) {
+  .cal-card { padding:10px; }
+  .cal-cell { min-height:46px; padding:4px; }
+  .cal-total { margin-left:0; width:100%; }
+}

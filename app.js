@@ -467,6 +467,30 @@ function diaVencimentoValido(d) {
   return Number.isFinite(n) ? Math.min(28, Math.max(1, n)) : 5;
 }
 
+// Como cada cliente recorrente paga a mensalidade: 'pix' (padrão), 'boleto' ou 'cartao'.
+// Boleto e cartão são gerados por você a cada ciclo (depois que o anterior foi pago),
+// então a cobrança nasce sozinha, mas "sem os dados" até você anexar o boleto/link.
+function formaRecorrenciaDoCliente(c) {
+  const f = c && c.formaPagamentoRecorrente;
+  return ['pix', 'boleto', 'cartao'].includes(f) ? f : 'pix';
+}
+function formasDaRecorrencia(cli, settings) {
+  const f = formaRecorrenciaDoCliente(cli);
+  if (f === 'boleto') return ['boleto'];
+  if (f === 'cartao') return ['cartao'];
+  return (settings.pix || cli.pixChave) ? ['pix'] : [];
+}
+// Quais dados de pagamento ainda faltam anexar numa cobrança em aberto.
+function chargeFaltaDados(c) {
+  if (!c || c.status === 'pago' || c.isenta || !(Number(c.valor) > 0)) return [];
+  const f = c.formasPagamento || [];
+  const falta = [];
+  if (f.includes('boleto') && !c.boletoLink && !c.boletoCodigo) falta.push('boleto');
+  if (f.includes('cartao') && !c.linkPagamentoCartao) falta.push('cartao');
+  return falta;
+}
+const FALTA_LABEL = { boleto: 'boleto', cartao: 'link do cartão' };
+
 // Lança as mensalidades que faltam (do mês de início até o mês atual).
 // É idempotente: o id da cobrança é fixo (rec-<cliente>-<mês>), então rodar
 // várias vezes nunca duplica. Retorna quantas cobranças foram criadas.
@@ -512,7 +536,7 @@ function gerarMensalidadesRecorrentes() {
             descricao: `Mensalidade ${competenciaLabel(mes)} — ${planoTxt}`,
             valor: Number(cli.valorPlano),
             status: 'pendente', dataPagamento: null,
-            formasPagamento: (settings.pix || cli.pixChave) ? ['pix'] : []
+            formasPagamento: formasDaRecorrencia(cli, settings)
           });
         }
         ids.add(id);
@@ -1581,7 +1605,16 @@ function openClientModal(id, onSaved) {
         </div>
       </div>
 
-      <div id="cPixRow" style="${editing && editing.recorrente ? '' : 'display:none;'}">
+      <div class="field" id="cFormaRecRow" style="${editing && editing.recorrente ? '' : 'display:none;'}">
+        <label class="field-label">Como este cliente paga a mensalidade</label>
+        <select class="input" id="cFormaRec">
+          <option value="pix" ${formaRecorrenciaDoCliente(editing) === 'pix' ? 'selected' : ''}>Pix (QR Code + copia e cola)</option>
+          <option value="boleto" ${formaRecorrenciaDoCliente(editing) === 'boleto' ? 'selected' : ''}>Boleto (eu gero e anexo a cada mês)</option>
+          <option value="cartao" ${formaRecorrenciaDoCliente(editing) === 'cartao' ? 'selected' : ''}>Cartão (link de pagamento a cada mês)</option>
+        </select>
+        <div class="view-desc" style="margin-top:4px;">Boleto e cartão: a mensalidade é lançada sozinha, mas fica marcada como "falta boleto/link" até você anexar. Aí a mensagem sai com os dados certos.</div>
+      </div>
+      <div id="cPixRow" style="${editing && editing.recorrente && formaRecorrenciaDoCliente(editing) === 'pix' ? '' : 'display:none;'}">
         <div class="field">
           <label class="field-label">🔑 Chave Pix deste cliente (opcional)</label>
           <input class="input" id="cPixChave" placeholder="CPF, CNPJ, e-mail, celular ou chave aleatória" value="${editing ? escapeHtml(editing.pixChave || '') : ''}">
@@ -1634,10 +1667,14 @@ function openClientModal(id, onSaved) {
     const plano = planoById(id);
     if (plano) qs('#cValorPlano').value = plano.valor;
   };
-  qs('#cRecorrente').onchange = () => {
-    qs('#cRecorrenciaRow').style.display = qs('#cRecorrente').checked ? '' : 'none';
-    qs('#cPixRow').style.display = qs('#cRecorrente').checked ? '' : 'none';
+  const atualizarRecVisivel = () => {
+    const rec = qs('#cRecorrente').checked;
+    qs('#cRecorrenciaRow').style.display = rec ? '' : 'none';
+    qs('#cFormaRecRow').style.display = rec ? '' : 'none';
+    qs('#cPixRow').style.display = rec && qs('#cFormaRec').value === 'pix' ? '' : 'none';
   };
+  qs('#cRecorrente').onchange = atualizarRecVisivel;
+  qs('#cFormaRec').onchange = atualizarRecVisivel;
   qs('#clientForm').onsubmit = (e) => {
     e.preventDefault();
 
@@ -1727,7 +1764,8 @@ function openClientModal(id, onSaved) {
       diaVencimento: diaVencimentoValido(qs('#cDiaVenc').value),
       recorrenciaInicio: qs('#cRecInicio').value || todayISO().slice(0, 7),
       pixChave: pixChaveRaw,
-      pixTitular: qs('#cPixTitular').value.trim()
+      pixTitular: qs('#cPixTitular').value.trim(),
+      formaPagamentoRecorrente: qs('#cFormaRec').value
     };
     if (editing) {
       const idx = clients.findIndex(c => c.id === editing.id);
@@ -1798,7 +1836,7 @@ function renderClienteDetalhe(clientId) {
         <div class="stat-label">Plano</div>
         <div class="stat-value" style="font-size:16px;">${client.plano ? escapeHtml(client.plano) : '—'}</div>
         ${client.valorPlano != null ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(client.valorPlano)}/mês</div>` : ''}
-        ${client.recorrente ? `<div class="view-desc" style="margin-top:4px;">🔁 Lançamento automático, vence dia ${diaVencimentoValido(client.diaVencimento)}</div>` : ''}
+        ${client.recorrente ? `<div class="view-desc" style="margin-top:4px;">🔁 Lançamento automático, vence dia ${diaVencimentoValido(client.diaVencimento)} · paga via ${{ pix: 'Pix', boleto: 'boleto', cartao: 'cartão' }[formaRecorrenciaDoCliente(client)]}</div>` : ''}
         ${client.pixChave ? `<div class="view-desc" style="margin-top:4px;">🔑 Pix próprio: ${escapeHtml(client.pixChave)}</div>` : ''}
       </div>
       <div class="stat-card">
@@ -2025,12 +2063,13 @@ function renderChargeLedger(charges, opts = {}) {
         return `
         <div class="ledger-row">
           <div class="ledger-main">
-            <div class="ledger-title">${escapeHtml(nomeExibicao)}${!client && c.avulsoNome ? ' <span class="avulso-tag">avulsa</span>' : ''}${c.recorrente ? ' <span class="avulso-tag">🔁 mensal</span>' : ''}</div>
+            <div class="ledger-title">${escapeHtml(nomeExibicao)}${!client && c.avulsoNome ? ' <span class="avulso-tag">avulsa</span>' : ''}${c.recorrente ? ' <span class="avulso-tag">🔁 mensal</span>' : ''}${chargeFaltaDados(c).length ? ` <span class="avulso-tag" style="background:var(--stamp-pendente-bg, #f3e3b3);">⏳ falta ${chargeFaltaDados(c).map(k => FALTA_LABEL[k]).join(' e ')}</span>` : ''}</div>
             <div class="ledger-sub">${escapeHtml(c.descricao)} · vence ${formatDateBR(c.vencimento)}${status === 'pago' && c.formaPagamentoUsada ? ' · pago via ' + formaPagamentoLabel(c.formaPagamentoUsada) : ''}</div>
           </div>
           <span class="stamp-badge ${stampClass}">${stampLabel}</span>
           <div class="ledger-value">${formatCurrency(c.valor)}</div>
           <div class="ledger-actions">
+            ${status !== 'pago' && !c.isenta && (c.formasPagamento || []).some(f => f === 'boleto' || f === 'cartao') ? `<button class="btn btn-ghost btn-sm" data-dados-charge="${c.id}">${(c.formasPagamento || []).includes('boleto') && (c.formasPagamento || []).includes('cartao') ? '🧾 Boleto/cartão' : (c.formasPagamento || []).includes('boleto') ? '🧾 Boleto' : '💳 Link cartão'}</button>` : ''}
             ${status !== 'pago' && !c.isenta && Number(c.valor) > 0 && chargeAceitaPix(c, client) && pixConfigParaCliente(client).chave ? `<button class="btn btn-ghost btn-sm" data-pix-charge="${c.id}">QR Pix</button>` : ''}
             ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">Enviar</button>` : ''}
             ${status !== 'pago' ? `<button class="btn btn-ghost btn-sm" data-pay-charge="${c.id}">Marcar pago</button>` : ''}
@@ -2054,6 +2093,7 @@ function bindChargeActions() {
     });
   });
   qsa('[data-pix-charge]').forEach(b => b.onclick = () => openPixQrModal(b.dataset.pixCharge));
+  qsa('[data-dados-charge]').forEach(b => b.onclick = () => openDadosPagamentoModal(b.dataset.dadosCharge));
   qsa('[data-send-charge]').forEach(b => b.onclick = () => openWhatsappModal(b.dataset.sendCharge));
   qsa('[data-pay-charge]').forEach(b => b.onclick = () => openMarkPaidModal(b.dataset.payCharge));
   qsa('[data-isentar-charge]').forEach(b => b.onclick = () => isentarCobranca(b.dataset.isentarCharge));
@@ -2078,6 +2118,52 @@ function formaPagamentoLabel(valor) {
     outro: 'Outro'
   };
   return labels[valor] || valor || '';
+}
+
+// Anexa (ou corrige) o boleto / link do cartão de uma cobrança já criada —
+// é o que você faz todo mês nas mensalidades de boleto e cartão.
+function openDadosPagamentoModal(chargeId) {
+  const charge = getCharges().find(c => c.id === chargeId);
+  if (!charge) return;
+  const f = charge.formasPagamento || [];
+  const client = charge.clientId ? clientById(charge.clientId) : null;
+  openModal(`
+    <div class="modal-title">Dados de pagamento — ${escapeHtml(client ? client.nome : (charge.avulsoNome || ''))}</div>
+    <p class="view-desc" style="margin:-8px 0 14px;">${escapeHtml(charge.descricao)} · ${formatCurrency(charge.valor)}</p>
+    ${f.includes('boleto') ? `
+    <div class="field">
+      <label class="field-label">🧾 Link do boleto</label>
+      <input class="input" id="dpBoletoLink" placeholder="https://..." value="${escapeHtml(charge.boletoLink || '')}">
+    </div>
+    <div class="field">
+      <label class="field-label">🔢 Código de barras / linha digitável</label>
+      <input class="input" id="dpBoletoCodigo" value="${escapeHtml(charge.boletoCodigo || '')}">
+    </div>` : ''}
+    ${f.includes('cartao') ? `
+    <div class="field">
+      <label class="field-label">💳 Link para pagar no cartão</label>
+      <input class="input" id="dpCartaoLink" placeholder="https://..." value="${escapeHtml(charge.linkPagamentoCartao || '')}">
+    </div>` : ''}
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" id="btnDpCancelar">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="btnDpSalvar">Salvar</button>
+    </div>
+  `);
+  qs('#btnDpCancelar').onclick = closeModal;
+  const normLink = (v) => { v = (v || '').trim(); return v && !/^https?:\/\//i.test(v) ? 'https://' + v : v; };
+  qs('#btnDpSalvar').onclick = () => {
+    const charges = getCharges();
+    const idx = charges.findIndex(c => c.id === chargeId);
+    if (idx < 0) return;
+    if (qs('#dpBoletoLink')) {
+      charges[idx].boletoLink = normLink(qs('#dpBoletoLink').value) || null;
+      charges[idx].boletoCodigo = qs('#dpBoletoCodigo').value.trim() || null;
+    }
+    if (qs('#dpCartaoLink')) charges[idx].linkPagamentoCartao = normLink(qs('#dpCartaoLink').value) || null;
+    saveCharges(charges);
+    closeModal();
+    navigate(currentView);
+  };
 }
 
 function openMarkPaidModal(chargeId) {
@@ -2136,6 +2222,11 @@ function openMarkPaidModal(chargeId) {
     const premiado = concederIsencaoPorIndicacao(charges[idx]);
     closeModal();
     if (premiado) alert(`🎁 ${premiado} ganhou 1 mensalidade isenta por essa indicação! Ela será usada na próxima mensalidade recorrente dele(a) — ou use o botão "Isentar" numa mensalidade em aberto.`);
+    const cliPago = charges[idx].clientId ? clientById(charges[idx].clientId) : null;
+    if (charges[idx].recorrente && cliPago && formaRecorrenciaDoCliente(cliPago) !== 'pix') {
+      const oque = formaRecorrenciaDoCliente(cliPago) === 'boleto' ? 'o boleto' : 'o link do cartão';
+      alert(`✅ Pago! Agora é a hora de gerar ${oque} da próxima mensalidade de ${cliPago.nome}. Quando ela for lançada, vai aparecer em Cobranças com o aviso "falta ${oque.replace('o ', '')}" e o botão pra anexar.`);
+    }
     navigate(currentView);
   };
 }
@@ -2434,6 +2525,7 @@ function openChargeModal(presets, onSaved) {
       saveClients(getClients().map(x => x.id === cli.id ? {
         ...x,
         recorrente: true,
+        formaPagamentoRecorrente: formasPagamento.includes('pix') ? 'pix' : formasPagamento.includes('boleto') ? 'boleto' : formasPagamento.includes('cartao') ? 'cartao' : formaRecorrenciaDoCliente(x),
         valorPlano: valor,
         plano: x.plano || descricao,
         diaVencimento: diaVenc,
@@ -2470,6 +2562,121 @@ function openChargeModal(presets, onSaved) {
 }
 
 // ---------- AGENDA / REUNIÕES ----------
+// ---------- CALENDÁRIO DA AGENDA (reuniões + vencimentos) ----------
+let _agendaMes = null;  // 'AAAA-MM'
+let _agendaDia = null;  // 'AAAA-MM-DD'
+const MESES_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+const DIAS_SEMANA_CURTO = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+
+function agendaEventosDoMes(mes) {
+  const porDia = {};
+  const add = (dia, ev) => { (porDia[dia] = porDia[dia] || []).push(ev); };
+  getMeetings().forEach(m => {
+    if (m.data && m.data.startsWith(mes) && m.status !== 'cancelada') add(m.data, { tipo: m.status === 'realizada' ? 'reuniao-feita' : 'reuniao' });
+  });
+  getCharges().forEach(c => {
+    if (!c.vencimento || !c.vencimento.startsWith(mes) || c.isenta || !(Number(c.valor) > 0)) return;
+    const st = chargeStatus(c);
+    add(c.vencimento, { tipo: st === 'pago' ? 'venc-pago' : (st === 'atrasado' ? 'venc-atrasado' : 'venc-pendente') });
+  });
+  return porDia;
+}
+
+function renderAgendaCalendario() {
+  const hoje = todayISO();
+  if (!_agendaMes) _agendaMes = hoje.slice(0, 7);
+  if (!_agendaDia && _agendaMes === hoje.slice(0, 7)) _agendaDia = hoje;
+  const [ano, mesNum] = _agendaMes.split('-').map(Number);
+  const primeiroDow = new Date(ano, mesNum - 1, 1).getDay();
+  const diasNoMes = new Date(ano, mesNum, 0).getDate();
+  const porDia = agendaEventosDoMes(_agendaMes);
+
+  const aReceber = getCharges().filter(c => c.vencimento && c.vencimento.startsWith(_agendaMes) && !c.isenta && chargeStatus(c) !== 'pago')
+    .reduce((t, c) => t + (Number(c.valor) || 0), 0);
+
+  let celulas = '';
+  for (let i = 0; i < primeiroDow; i++) celulas += '<div class="cal-cell cal-vazio"></div>';
+  for (let d = 1; d <= diasNoMes; d++) {
+    const iso = `${_agendaMes}-${String(d).padStart(2, '0')}`;
+    const evs = porDia[iso] || [];
+    const dots = evs.slice(0, 5).map(e => `<span class="cal-dot ${e.tipo}"></span>`).join('') + (evs.length > 5 ? `<span class="cal-mais">+${evs.length - 5}</span>` : '');
+    celulas += `<button type="button" class="cal-cell${iso === hoje ? ' cal-hoje' : ''}${iso === _agendaDia ? ' cal-sel' : ''}" data-cal-dia="${iso}">
+      <span class="cal-num">${d}</span><span class="cal-dots">${dots}</span></button>`;
+  }
+
+  return `
+    <div class="cal-card">
+      <div class="cal-head">
+        <button type="button" class="btn btn-ghost btn-sm" id="calPrev" aria-label="Mês anterior">‹</button>
+        <div class="cal-titulo">${MESES_PT[mesNum - 1]} de ${ano}</div>
+        <button type="button" class="btn btn-ghost btn-sm" id="calNext" aria-label="Próximo mês">›</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="calHoje">Hoje</button>
+      </div>
+      <div class="cal-grid">
+        ${DIAS_SEMANA_CURTO.map(n => `<div class="cal-dow">${n}</div>`).join('')}
+        ${celulas}
+      </div>
+      <div class="cal-legenda">
+        <span><i class="cal-dot reuniao"></i> Reunião</span>
+        <span><i class="cal-dot venc-pendente"></i> Vencimento</span>
+        <span><i class="cal-dot venc-atrasado"></i> Atrasado</span>
+        <span><i class="cal-dot venc-pago"></i> Pago</span>
+        ${aReceber > 0 ? `<span class="cal-total">A receber no mês: <strong>${formatCurrency(aReceber)}</strong></span>` : ''}
+      </div>
+    </div>
+    <div id="agendaDia"></div>
+  `;
+}
+
+function renderAgendaDia() {
+  const box = qs('#agendaDia');
+  if (!box) return;
+  if (!_agendaDia) { box.innerHTML = ''; return; }
+  const [a, m, d] = _agendaDia.split('-').map(Number);
+  const titulo = new Date(a, m - 1, d).toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
+  const reunioes = getMeetings().filter(x => x.data === _agendaDia)
+    .sort((x, y) => (x.hora || '').localeCompare(y.hora || ''));
+  const cobrancas = getCharges().filter(c => c.vencimento === _agendaDia && !c.isenta);
+  box.innerHTML = `
+    <div class="cal-dia-head">
+      <div class="section-title" style="margin:0; text-transform:capitalize;">${titulo}</div>
+      <button type="button" class="btn btn-ghost btn-sm" id="calNovaReuniao">+ Reunião neste dia</button>
+    </div>
+    ${reunioes.length === 0 && cobrancas.length === 0 ? '<div class="view-desc" style="margin-bottom:26px;">Nada marcado para este dia.</div>' : ''}
+    ${reunioes.length ? `<div class="field-label" style="margin:8px 0 6px;">Reuniões</div><div class="ledger" style="margin-bottom:18px;">${reunioes.map(x => renderMeetingRow(x)).join('')}</div>` : ''}
+    ${cobrancas.length ? `<div class="field-label" style="margin:8px 0 6px;">Vencimentos</div><div style="margin-bottom:26px;">${renderChargeLedger(cobrancas, { compact: true })}</div>` : ''}
+  `;
+  // o modal de nova reunião abre com a data de hoje; aqui já vem com o dia selecionado
+  const btn = qs('#calNovaReuniao');
+  btn.onclick = () => {
+    openMeetingModal(null, null, () => renderAgenda());
+    const campo = qs('#mData');
+    if (campo) campo.value = _agendaDia;
+  };
+  bindMeetingActions(() => renderAgenda());
+  bindChargeActions();
+}
+
+function bindAgendaCalendario() {
+  const mudaMes = (delta) => {
+    let [a, m] = _agendaMes.split('-').map(Number);
+    m += delta;
+    if (m < 1) { m = 12; a--; }
+    if (m > 12) { m = 1; a++; }
+    _agendaMes = `${a}-${String(m).padStart(2, '0')}`;
+    _agendaDia = null;
+    renderAgenda();
+  };
+  qs('#calPrev').onclick = () => mudaMes(-1);
+  qs('#calNext').onclick = () => mudaMes(1);
+  qs('#calHoje').onclick = () => { _agendaMes = todayISO().slice(0, 7); _agendaDia = todayISO(); renderAgenda(); };
+  qsa('[data-cal-dia]').forEach(b => b.onclick = () => {
+    _agendaDia = _agendaDia === b.dataset.calDia ? null : b.dataset.calDia;
+    renderAgenda();
+  });
+  renderAgendaDia();
+}
+
 function renderAgenda() {
   const meetings = getMeetings().sort((a, b) => (a.data + (a.hora || '')).localeCompare(b.data + (b.hora || '')));
   const hoje = todayISO();
@@ -2481,10 +2688,12 @@ function renderAgenda() {
     <div class="view-header">
       <div>
         <div class="view-title">Agenda</div>
-        <div class="view-desc">Suas reuniões e compromissos com clientes</div>
+        <div class="view-desc">Reuniões e vencimentos de cobranças no calendário</div>
       </div>
       <button class="btn btn-primary" id="btnNovaReuniao">+ Nova reunião</button>
     </div>
+
+    ${renderAgendaCalendario()}
 
     <div class="section-title">Próximas</div>
     ${futuras.length === 0 ? emptyState('Nada agendado', 'Clique em "Nova reunião" para marcar um compromisso.') : `
@@ -2498,6 +2707,7 @@ function renderAgenda() {
   `;
 
   qs('#btnNovaReuniao').onclick = () => openMeetingModal(null, null, () => renderAgenda());
+  bindAgendaCalendario();
   bindMeetingActions(() => renderAgenda());
 }
 
@@ -2622,14 +2832,19 @@ function openMeetingModal(meetingId, presetClientId, onSaved) {
 // ---------- ENVIO WHATSAPP ----------
 // obs: WhatsApp usa *asterisco* pra deixar o texto em negrito
 const MODELO_COBRANCA_PADRAO =
-`Oi, {nome}! {quem_fala}
+`Oi, {nome}! Tudo bem? 😊
 
-Passando pra lembrar da cobrança de *{descricao}* 🧾
-💰 Valor: {valor}
-📅 {vencimento_relativo} ({vencimento_data})
+Aqui é a *NetBug | Assistente de IA do Dalton Neres*.
+
+Passando para lembrar da sua *{descricao}* 🧾
+
+💰 *Valor:* {valor}
+📅 *Vencimento:* {vencimento_relativo} ({vencimento_data})
 {atraso}{pagamento}
 
-Qualquer dúvida, é só chamar por aqui! 🙏`;
+Se o pagamento já foi realizado, pode desconsiderar esta mensagem.
+
+Qualquer dúvida, ficamos à disposição! 🙏`;
 
 function renderTemplate(template, vars) {
   return String(template || '').replace(/\{(\w+)\}/g, (m, key) => (vars[key] != null ? vars[key] : ''));
@@ -2645,6 +2860,21 @@ function pixChaveRotulo(chave) {
   return aleatoria ? 'Chave PIX (aleatória)' : 'Chave PIX';
 }
 
+const MODELO_RECORRENTE_PADRAO =
+`Oi, {nome}! Tudo bem? 😊
+
+Aqui é a *NetBug | Assistente de IA do Dalton Neres*.
+
+Passando para lembrar da sua *mensalidade de {competencia}* ({plano}) 🧾
+
+💰 *Valor:* {valor}
+📅 *Vencimento:* {vencimento_relativo} ({vencimento_data})
+{atraso}{pagamento}
+
+Se o pagamento já foi realizado, pode desconsiderar esta mensagem.
+
+Qualquer dúvida, ficamos à disposição! 🙏`;
+
 function buildLinhasPagamento(charge, settings) {
   // Compatibilidade: cobranças criadas antes dessa opção existir não têm
   // "formasPagamento" salvo — nesse caso, mantém o comportamento de sempre
@@ -2652,6 +2882,7 @@ function buildLinhasPagamento(charge, settings) {
   const client = charge.clientId ? clientById(charge.clientId) : null;
   const cfgPix = pixConfigParaCliente(client);
   const formas = charge.formasPagamento || [];
+  const ehRecorr = clienteEhRecorrente(charge, client);
   let linhas = '';
   if (chargeAceitaPix(charge, client) && cfgPix.chaveExibida) {
     linhas += `\n💳 ${pixChaveRotulo(cfgPix.chaveExibida)}: *${cfgPix.chaveExibida}*`;
@@ -2669,12 +2900,16 @@ function buildLinhasPagamento(charge, settings) {
   if (formas.includes('cartao')) {
     linhas += charge.linkPagamentoCartao
       ? `\n💳 Link para pagar no cartão (crédito/débito): ${charge.linkPagamentoCartao}`
-      : `\n💳 Também aceito cartão de crédito/débito.`;
+      : (ehRecorr
+        ? `\n💳 O link para pagar esta mensalidade no cartão te envio por aqui assim que estiver pronto.`
+        : `\n💳 Também aceito cartão de crédito/débito.`);
   }
   if (formas.includes('boleto')) {
     if (charge.boletoLink) linhas += `\n🧾 Boleto: ${charge.boletoLink}`;
     if (charge.boletoCodigo) linhas += `\n🔢 Código de barras: *${charge.boletoCodigo}*`;
-    if (!charge.boletoLink && !charge.boletoCodigo) linhas += `\n🧾 Também aceito boleto (te mando os dados à parte).`;
+    if (!charge.boletoLink && !charge.boletoCodigo) linhas += ehRecorr
+      ? `\n🧾 O boleto desta mensalidade te envio por aqui assim que estiver pronto.`
+      : `\n🧾 Também aceito boleto (te mando os dados à parte).`;
   }
   if (formas.includes('dinheiro')) {
     linhas += `\n💵 Também aceito em dinheiro.`;
@@ -2695,13 +2930,18 @@ function montarVariaveisMensagemCobranca(charge, client, settings) {
     vencimento_data: formatDateBR(charge.vencimento),
     vencimento_relativo: vencimentoRelativoLabel(charge.vencimento),
     atraso,
-    pagamento
+    pagamento,
+    competencia: charge.competencia ? competenciaLabel(charge.competencia) : String(charge.vencimento || '').slice(5, 7) + '/' + String(charge.vencimento || '').slice(0, 4),
+    plano: (client && client.plano) || ''
   };
 }
 
 function buildMessage(charge, client) {
   const settings = getSettings();
-  const template = settings.modeloCobranca || MODELO_COBRANCA_PADRAO;
+  // Cliente de mensalidade recorrente tem texto próprio (Configurações → Mensagem de mensalidade)
+  const template = clienteEhRecorrente(charge, client)
+    ? (settings.modeloCobrancaRecorrente || MODELO_RECORRENTE_PADRAO)
+    : (settings.modeloCobranca || MODELO_COBRANCA_PADRAO);
   return renderTemplate(template, montarVariaveisMensagemCobranca(charge, client, settings));
 }
 
@@ -2709,6 +2949,8 @@ function openWhatsappModal(chargeId) {
   const charge = getCharges().find(c => c.id === chargeId);
   const client = charge.clientId ? clientById(charge.clientId) : { nome: charge.avulsoNome, telefone: charge.avulsoTelefone };
   if (!client || !client.telefone) { alert('Essa cobrança não tem um WhatsApp válido pra enviar.'); return; }
+  const falta = chargeFaltaDados(charge);
+  if (falta.length && !confirm(`Essa cobrança ainda está sem ${falta.map(k => FALTA_LABEL[k]).join(' e ')}. Enviar assim mesmo?\n\n(Cancelar = voltar e anexar primeiro, no botão da cobrança.)`)) return;
   let opts = null;
   if (!charge.isenta && Number(charge.valor) > 0 && chargeAceitaPix(charge, client)) {
     const payload = pixPayloadDaCobranca(charge);
@@ -4869,6 +5111,35 @@ function renderConfig() {
     <div class="field-label" style="margin-bottom:6px;">Pré-visualização (com dados de exemplo)</div>
     <div class="wa-preview" id="previewModeloCobranca" style="max-width:520px; margin-bottom:32px;"></div>
 
+    <div class="section-title">Mensagem de mensalidade (clientes recorrentes)</div>
+    <p class="view-desc" style="margin-bottom:12px;">
+      Texto usado só nas mensalidades dos clientes recorrentes. A parte do pagamento muda sozinha
+      conforme o cliente paga (Pix, boleto ou cartão). Variáveis extras:
+    </p>
+    <p class="view-desc" style="margin-bottom:14px; font-family:var(--font-mono); font-size:12px;">
+      {nome} {quem_fala} {plano} {competencia} {valor} {vencimento_data} {vencimento_relativo} {atraso} {pagamento}
+    </p>
+    <form id="modeloRecorrenteForm" style="max-width:520px; margin-bottom:12px;">
+      <div class="field">
+        <textarea class="input" id="sModeloRecorrente" style="min-height:190px; font-size:13px;">${escapeHtml(s.modeloCobrancaRecorrente || MODELO_RECORRENTE_PADRAO)}</textarea>
+      </div>
+      <div style="display:flex; gap:10px; margin-bottom:16px;">
+        <button type="submit" class="btn btn-primary">Salvar modelo</button>
+        <button type="button" class="btn btn-ghost" id="btnRestaurarModeloRec">Restaurar padrão</button>
+      </div>
+    </form>
+    <div class="field" style="max-width:520px;">
+      <label class="field-label">Pré-visualizar como cliente que paga com</label>
+      <select class="input" id="sPreviewFormaRec">
+        <option value="pix">Pix</option>
+        <option value="boleto">Boleto (com boleto anexado)</option>
+        <option value="boleto-sem">Boleto (ainda sem anexar)</option>
+        <option value="cartao">Cartão (com link anexado)</option>
+        <option value="cartao-sem">Cartão (ainda sem anexar)</option>
+      </select>
+    </div>
+    <div class="wa-preview" id="previewModeloRecorrente" style="max-width:520px; margin-bottom:32px;"></div>
+
     <div class="section-title">Seus dados no contrato</div>
     <p class="view-desc" style="margin-bottom:14px;">Usados como CONTRATADO ao gerar contratos. Já vêm com os dados do seu modelo — mude só se algo tiver mudado.</p>
     <form id="contratadoForm" style="max-width:420px; margin-bottom:32px;">
@@ -5023,6 +5294,37 @@ function renderConfig() {
     e.preventDefault();
     saveSettings({ ...getSettings(), modeloCobranca: qs('#sModeloCobranca').value });
     alert('Modelo salvo.');
+  };
+
+  function atualizarPreviewModeloRecorrente() {
+    const settings = getSettings();
+    const v = qs('#sPreviewFormaRec').value;
+    const forma = v.split('-')[0];
+    const sem = v.endsWith('-sem');
+    const chargeExemplo = {
+      descricao: 'Mensalidade ' + competenciaLabel(todayISO().slice(0, 7)) + ' — Suporte Básico',
+      valor: 150, vencimento: todayISO(), status: 'pendente',
+      recorrente: true, competencia: todayISO().slice(0, 7),
+      formasPagamento: [forma],
+      boletoLink: forma === 'boleto' && !sem ? 'https://exemplo.com/boleto' : null,
+      boletoCodigo: forma === 'boleto' && !sem ? '00000.00000 00000.000000 00000.000000 0 00000000000000' : null,
+      linkPagamentoCartao: forma === 'cartao' && !sem ? 'https://exemplo.com/pagar' : null
+    };
+    const clienteExemplo = { nome: 'Maria', plano: 'Suporte Básico', recorrente: true, pixChave: forma === 'pix' ? (settings.pix || 'maria@exemplo.com') : '' };
+    const vars = montarVariaveisMensagemCobranca(chargeExemplo, clienteExemplo, settings);
+    qs('#previewModeloRecorrente').textContent = renderTemplate(qs('#sModeloRecorrente').value, vars);
+  }
+  atualizarPreviewModeloRecorrente();
+  qs('#sModeloRecorrente').addEventListener('input', atualizarPreviewModeloRecorrente);
+  qs('#sPreviewFormaRec').onchange = atualizarPreviewModeloRecorrente;
+  qs('#btnRestaurarModeloRec').onclick = () => {
+    qs('#sModeloRecorrente').value = MODELO_RECORRENTE_PADRAO;
+    atualizarPreviewModeloRecorrente();
+  };
+  qs('#modeloRecorrenteForm').onsubmit = (e) => {
+    e.preventDefault();
+    saveSettings({ ...getSettings(), modeloCobrancaRecorrente: qs('#sModeloRecorrente').value });
+    alert('Modelo de mensalidade salvo.');
   };
 
   qs('#contratadoForm').onsubmit = (e) => {
