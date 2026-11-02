@@ -286,7 +286,6 @@ function chargeStatus(charge) {
 }
 
 
-<<<<<<< HEAD
 // ---------- PIX: chave própria por cliente + QR Code (BRCode) ----------
 // Cada cliente (principalmente os de mensalidade recorrente) pode ter uma chave
 // Pix diferente da chave geral das Configurações. O QR Code é um Pix "copia e
@@ -447,8 +446,6 @@ function openPixQrModal(chargeId) {
   });
 }
 
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
 // ---------- MENSALIDADES RECORRENTES + INDICAÇÕES ----------
 // Cliente com "recorrente = true" ganha uma cobrança de mensalidade lançada
 // sozinha a cada mês (valor = valorPlano, vence no diaVencimento).
@@ -515,11 +512,7 @@ function gerarMensalidadesRecorrentes() {
             descricao: `Mensalidade ${competenciaLabel(mes)} — ${planoTxt}`,
             valor: Number(cli.valorPlano),
             status: 'pendente', dataPagamento: null,
-<<<<<<< HEAD
             formasPagamento: (settings.pix || cli.pixChave) ? ['pix'] : []
-=======
-            formasPagamento: settings.pix ? ['pix'] : []
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
           });
         }
         ids.add(id);
@@ -1171,7 +1164,6 @@ function renderDashboard() {
   const meetings = getMeetings();
   const settings = getSettings();
 
-<<<<<<< HEAD
   const mesAtual = todayISO().slice(0, 7);
   // "A receber" e a lista de cobranças em aberto contam só o que vence NESTE mês.
   // Atrasos de meses anteriores continuam visíveis no card "Atrasado".
@@ -1183,17 +1175,6 @@ function renderDashboard() {
     .reduce((sum, c) => sum + Number(c.valor), 0);
 
   const pendentes = abertasMes
-=======
-  const aReceber = charges.filter(c => chargeStatus(c) !== 'pago')
-    .reduce((sum, c) => sum + Number(c.valor), 0);
-  const atrasado = charges.filter(c => chargeStatus(c) === 'atrasado')
-    .reduce((sum, c) => sum + Number(c.valor), 0);
-  const mesAtual = todayISO().slice(0, 7);
-  const recebidoMes = charges.filter(c => c.status === 'pago' && (c.dataPagamento || '').slice(0, 7) === mesAtual)
-    .reduce((sum, c) => sum + Number(c.valor), 0);
-
-  const pendentes = charges.filter(c => chargeStatus(c) !== 'pago')
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
     .sort((a, b) => a.vencimento.localeCompare(b.vencimento))
     .slice(0, 8);
 
@@ -1272,11 +1253,7 @@ function renderDashboard() {
       <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">A receber</div>
         <div class="stat-value">${formatCurrency(aReceber)}</div>
-<<<<<<< HEAD
         <div class="stat-sub">${abertasMes.length} cobrança${abertasMes.length === 1 ? '' : 's'} em aberto · ${mesAnoLabel(mesAtual)}</div>
-=======
-        <div class="stat-sub">${abertas.length} cobrança${abertas.length === 1 ? '' : 's'} em aberto</div>
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
       </div>
       <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">Recebido no mês</div>
@@ -1297,11 +1274,7 @@ function renderDashboard() {
 
     <div class="dashboard-split">
       <div>
-<<<<<<< HEAD
         <div class="section-title section-title-row"><span>Cobranças em aberto · ${mesAnoLabel(mesAtual)}</span><a href="#" class="section-link" data-go="cobrancas">ver todas →</a></div>
-=======
-        <div class="section-title section-title-row"><span>Cobranças em aberto</span><a href="#" class="section-link" data-go="cobrancas">ver todas →</a></div>
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
         ${renderChargeLedger(pendentes, { compact: true })}
       </div>
       <div>
@@ -1608,7 +1581,6 @@ function openClientModal(id, onSaved) {
         </div>
       </div>
 
-<<<<<<< HEAD
       <div id="cPixRow" style="${editing && editing.recorrente ? '' : 'display:none;'}">
         <div class="field">
           <label class="field-label">🔑 Chave Pix deste cliente (opcional)</label>
@@ -1621,8 +1593,6 @@ function openClientModal(id, onSaved) {
         </div>
       </div>
 
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
       <div class="field">
         <label class="field-label">Indicado por (opcional)</label>
         <select class="input" id="cIndicadoPor">
@@ -1666,10 +1636,7 @@ function openClientModal(id, onSaved) {
   };
   qs('#cRecorrente').onchange = () => {
     qs('#cRecorrenciaRow').style.display = qs('#cRecorrente').checked ? '' : 'none';
-<<<<<<< HEAD
     qs('#cPixRow').style.display = qs('#cRecorrente').checked ? '' : 'none';
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
   };
   qs('#clientForm').onsubmit = (e) => {
     e.preventDefault();
@@ -1728,15 +1695,12 @@ function openClientModal(id, onSaved) {
       return;
     }
 
-<<<<<<< HEAD
     const pixChaveRaw = qs('#cPixChave').value.trim();
     if (pixChaveRaw && !/^[\x21-\x7E]+$/.test(normalizarChavePix(pixChaveRaw))) {
       alert('A chave Pix não pode ter espaços ou caracteres especiais. Confira e tente de novo.');
       return;
     }
 
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
     const indicadoPor = qs('#cIndicadoPor').value;
     if (editing && indicadoPor === editing.id) {
       alert('Um cliente não pode ser indicado por ele mesmo.');
@@ -1761,13 +1725,9 @@ function openClientModal(id, onSaved) {
       indicadoPorTexto: qs('#cIndicadoPorTexto').value.trim(),
       recorrente,
       diaVencimento: diaVencimentoValido(qs('#cDiaVenc').value),
-<<<<<<< HEAD
       recorrenciaInicio: qs('#cRecInicio').value || todayISO().slice(0, 7),
       pixChave: pixChaveRaw,
       pixTitular: qs('#cPixTitular').value.trim()
-=======
-      recorrenciaInicio: qs('#cRecInicio').value || todayISO().slice(0, 7)
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
     };
     if (editing) {
       const idx = clients.findIndex(c => c.id === editing.id);
@@ -1839,10 +1799,7 @@ function renderClienteDetalhe(clientId) {
         <div class="stat-value" style="font-size:16px;">${client.plano ? escapeHtml(client.plano) : '—'}</div>
         ${client.valorPlano != null ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(client.valorPlano)}/mês</div>` : ''}
         ${client.recorrente ? `<div class="view-desc" style="margin-top:4px;">🔁 Lançamento automático, vence dia ${diaVencimentoValido(client.diaVencimento)}</div>` : ''}
-<<<<<<< HEAD
         ${client.pixChave ? `<div class="view-desc" style="margin-top:4px;">🔑 Pix próprio: ${escapeHtml(client.pixChave)}</div>` : ''}
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
       </div>
       <div class="stat-card">
         <div class="stat-label">Indicado por</div>
@@ -2074,10 +2031,7 @@ function renderChargeLedger(charges, opts = {}) {
           <span class="stamp-badge ${stampClass}">${stampLabel}</span>
           <div class="ledger-value">${formatCurrency(c.valor)}</div>
           <div class="ledger-actions">
-<<<<<<< HEAD
             ${status !== 'pago' && !c.isenta && Number(c.valor) > 0 && chargeAceitaPix(c, client) && pixConfigParaCliente(client).chave ? `<button class="btn btn-ghost btn-sm" data-pix-charge="${c.id}">QR Pix</button>` : ''}
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
             ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">Enviar</button>` : ''}
             ${status !== 'pago' ? `<button class="btn btn-ghost btn-sm" data-pay-charge="${c.id}">Marcar pago</button>` : ''}
             ${podeIsentar ? `<button class="btn btn-ghost btn-sm" data-isentar-charge="${c.id}">🎁 Isentar</button>` : ''}
@@ -2099,10 +2053,7 @@ function bindChargeActions() {
       row.style.display = row.textContent.toLowerCase().includes(termo) ? '' : 'none';
     });
   });
-<<<<<<< HEAD
   qsa('[data-pix-charge]').forEach(b => b.onclick = () => openPixQrModal(b.dataset.pixCharge));
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
   qsa('[data-send-charge]').forEach(b => b.onclick = () => openWhatsappModal(b.dataset.sendCharge));
   qsa('[data-pay-charge]').forEach(b => b.onclick = () => openMarkPaidModal(b.dataset.payCharge));
   qsa('[data-isentar-charge]').forEach(b => b.onclick = () => isentarCobranca(b.dataset.isentarCharge));
@@ -2336,11 +2287,7 @@ function openChargeModal(presets, onSaved) {
         <div class="payment-check-group">
           <label class="service-check" style="border-bottom:none; padding:8px 10px;">
             <input type="checkbox" id="chPagPix" ${getSettings().pix ? 'checked' : ''}>
-<<<<<<< HEAD
             <span>Pix ${getSettings().pix ? '' : '<span class="quick-calc-result" style="color:var(--ink-soft); display:inline;">(cadastre sua chave em Configurações ou no cadastro do cliente)</span>'}</span>
-=======
-            <span>Pix ${getSettings().pix ? '' : '<span class="quick-calc-result" style="color:var(--ink-soft); display:inline;">(cadastre sua chave em Configurações)</span>'}</span>
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
           </label>
           <label class="service-check" style="border-bottom:none; padding:8px 10px;">
             <input type="checkbox" id="chPagCartao">
@@ -2401,11 +2348,8 @@ function openChargeModal(presets, onSaved) {
 
   function atualizarHintPlano() {
     atualizarRecorrenciaUI();
-<<<<<<< HEAD
     const cliPix = qs('#chCliente') ? clientById(qs('#chCliente').value) : null;
     if (cliPix && cliPix.pixChave && qs('#chPagPix')) qs('#chPagPix').checked = true;
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
     const hintEl = qs('#chPlanoHint');
     if (!hintEl) return;
     const clienteSelect = qs('#chCliente');
@@ -2691,7 +2635,6 @@ function renderTemplate(template, vars) {
   return String(template || '').replace(/\{(\w+)\}/g, (m, key) => (vars[key] != null ? vars[key] : ''));
 }
 
-<<<<<<< HEAD
 // Cobrança de cliente recorrente (mensalidade): sempre manda chave + copia e cola + QR Code,
 // pra o cliente não errar na hora de pagar.
 function clienteEhRecorrente(charge, client) {
@@ -2702,13 +2645,10 @@ function pixChaveRotulo(chave) {
   return aleatoria ? 'Chave PIX (aleatória)' : 'Chave PIX';
 }
 
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
 function buildLinhasPagamento(charge, settings) {
   // Compatibilidade: cobranças criadas antes dessa opção existir não têm
   // "formasPagamento" salvo — nesse caso, mantém o comportamento de sempre
   // mostrar a chave PIX (se configurada), igual funcionava antes.
-<<<<<<< HEAD
   const client = charge.clientId ? clientById(charge.clientId) : null;
   const cfgPix = pixConfigParaCliente(client);
   const formas = charge.formasPagamento || [];
@@ -2726,13 +2666,6 @@ function buildLinhasPagamento(charge, settings) {
     }
   }
 
-=======
-  const formas = charge.formasPagamento || (settings.pix ? ['pix'] : []);
-  let linhas = '';
-  if (formas.includes('pix') && settings.pix) {
-    linhas += `\n💳 Chave PIX: *${settings.pix}*`;
-  }
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
   if (formas.includes('cartao')) {
     linhas += charge.linkPagamentoCartao
       ? `\n💳 Link para pagar no cartão (crédito/débito): ${charge.linkPagamentoCartao}`
@@ -2776,7 +2709,6 @@ function openWhatsappModal(chargeId) {
   const charge = getCharges().find(c => c.id === chargeId);
   const client = charge.clientId ? clientById(charge.clientId) : { nome: charge.avulsoNome, telefone: charge.avulsoTelefone };
   if (!client || !client.telefone) { alert('Essa cobrança não tem um WhatsApp válido pra enviar.'); return; }
-<<<<<<< HEAD
   let opts = null;
   if (!charge.isenta && Number(charge.valor) > 0 && chargeAceitaPix(charge, client)) {
     const payload = pixPayloadDaCobranca(charge);
@@ -2787,9 +2719,6 @@ function openWhatsappModal(chargeId) {
     }
   }
   openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client), null, opts);
-=======
-  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client));
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
 }
 
 function buildMeetingMessage(meeting, client) {
@@ -2823,7 +2752,6 @@ function openMeetingWhatsappModal(meetingId) {
   openSendWhatsappModal(`Enviar lembrete — ${client.nome}`, client, buildMeetingMessage(meeting, client));
 }
 
-<<<<<<< HEAD
 function openSendWhatsappModal(title, client, defaultMsg, onSent, opts) {
   const qr = opts && opts.qrCanvas ? opts : null;
   openModal(`
@@ -2833,11 +2761,6 @@ function openSendWhatsappModal(title, client, defaultMsg, onSent, opts) {
       <img class="pix-qr-img" style="width:150px;" alt="QR Code Pix" src="${qr.qrCanvas.toDataURL('image/png')}">
       <div class="view-desc" style="margin:0; text-align:center;">📷 QR Code Pix que vai junto com a mensagem</div>
     </div>` : ''}
-=======
-function openSendWhatsappModal(title, client, defaultMsg, onSent) {
-  openModal(`
-    <div class="modal-title">${escapeHtml(title)}</div>
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
     <div class="field">
       <label class="field-label">Mensagem (pode editar antes de enviar)</label>
       <textarea class="input" id="waMsg" style="min-height:170px;">${escapeHtml(defaultMsg)}</textarea>
@@ -2846,7 +2769,6 @@ function openSendWhatsappModal(title, client, defaultMsg, onSent) {
       <label class="field-label">Número do WhatsApp</label>
       <input class="input" id="waPhone" value="${escapeHtml(client.telefone)}">
     </div>
-<<<<<<< HEAD
     ${qr ? `<div class="view-desc" id="waHint" style="margin:0 0 10px;">${qr.payload ? 'Ordem: 1) mensagem + QR Code · 2) só o copia e cola, em mensagem separada.' : 'Envie a mensagem e cole o QR Code na conversa.'}</div>` : ''}
     <div class="modal-actions" style="flex-wrap:wrap;">
       <button type="button" class="btn btn-ghost" id="btnCancelWa">${qr ? 'Fechar' : 'Não enviar agora'}</button>
@@ -2893,19 +2815,10 @@ function openSendWhatsappModal(title, client, defaultMsg, onSent) {
     };
   }
 
-=======
-    <div class="modal-actions">
-      <button type="button" class="btn btn-ghost" id="btnCancelWa">Não enviar agora</button>
-      <button type="button" class="btn btn-whatsapp" id="btnOpenWa">Enviar no WhatsApp</button>
-    </div>
-  `);
-  qs('#btnCancelWa').onclick = closeModal;
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
   qs('#btnOpenWa').onclick = () => {
     const phone = onlyDigits(qs('#waPhone').value);
     const msg = qs('#waMsg').value;
     if (phone.length < 10) { alert('Número de WhatsApp inválido.'); return; }
-<<<<<<< HEAD
     if (qr) {
       // Copia o QR pra área de transferência e abre a conversa com o texto;
       // é só colar a imagem na conversa (Ctrl+V / segurar e colar).
@@ -2920,8 +2833,6 @@ function openSendWhatsappModal(title, client, defaultMsg, onSent) {
       if (onSent) onSent();
       return;
     }
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
     window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
     closeModal();
     if (onSent) onSent();
@@ -4927,13 +4838,10 @@ function renderConfig() {
         <input class="input" id="sPix" value="${escapeHtml(s.pix || '')}">
       </div>
       <div class="field">
-<<<<<<< HEAD
         <label class="field-label">Cidade (usada no QR Code Pix, opcional)</label>
         <input class="input" id="sPixCidade" maxlength="15" placeholder="Ex: Dois Vizinhos" value="${escapeHtml(s.pixCidade || '')}">
       </div>
       <div class="field">
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
         <label class="field-label">Desconto por indicação (R$, opcional)</label>
         <input class="input" type="number" min="0" step="0.01" id="sDescontoIndicacao" value="${s.valorDescontoIndicacao != null ? s.valorDescontoIndicacao : ''}">
       </div>
@@ -5081,10 +4989,7 @@ function renderConfig() {
       seuNome: qs('#sSeuNome').value.trim(),
       empresaNome: qs('#sEmpresa').value.trim(),
       pix: qs('#sPix').value.trim(),
-<<<<<<< HEAD
       pixCidade: qs('#sPixCidade').value.trim(),
-=======
->>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
       valorDescontoIndicacao: qs('#sDescontoIndicacao').value === '' ? null : Number(qs('#sDescontoIndicacao').value)
     });
     refreshBrandBar();
