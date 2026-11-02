@@ -1,0 +1,53 @@
+/* =======================================================
+   REGRAS DE SEGURANÇA DO FIRESTORE — Caixa Aberto
+   =======================================================
+   Como aplicar:
+   1. Acesse o Console do Firebase → seu projeto → Firestore Database → Regras.
+   2. Apague o conteúdo atual e cole este arquivo inteiro.
+   3. Clique em "Publicar".
+
+   O que essas regras garantem:
+   - Cada usuário só lê/escreve os PRÓPRIOS dados (users/{uid}/app/data),
+     a não ser que o dono dele tenha adicionado esse UID como colaborador.
+   - O documento de vínculo (users/{uid}/link/dono) só pode ser lido e
+     escrito pelo próprio usuário — ninguém consegue ler o vínculo de outra
+     pessoa nem se auto-vincular a uma conta que não autorizou.
+   - Nenhum outro caminho do banco é acessível (regra "deny by default").
+   ======================================================= */
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function estaLogado() {
+      return request.auth != null;
+    }
+
+    function ehDono(uid) {
+      return estaLogado() && request.auth.uid == uid;
+    }
+
+    // Verifica se quem está logado está na lista de colaboradores do "dono".
+    // Essa lista de UIDs fica em settings.colaboradoresUids (mantida junto
+    // com o cadastro de colaboradores, veja saveColaboradores no app.js).
+    function ehColaborador(uid) {
+      return estaLogado() &&
+        exists(/databases/$(database)/documents/users/$(uid)/app/data) &&
+        request.auth.uid in get(/databases/$(database)/documents/users/$(uid)/app/data).data.settings.colaboradoresUids;
+    }
+
+    match /users/{uid}/app/data {
+      allow read, write: if ehDono(uid) || ehColaborador(uid);
+    }
+
+    match /users/{uid}/link/dono {
+      allow read, write: if ehDono(uid);
+    }
+
+    // Bloqueia qualquer outro caminho por padrão.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

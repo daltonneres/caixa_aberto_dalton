@@ -9,7 +9,11 @@
    (ativado em firebase-config.js com enablePersistence).
    ======================================================= */
 
+<<<<<<< HEAD
 const CACHE_NAME = 'caixa-aberto-v3';
+=======
+const CACHE_NAME = 'caixa-aberto-v2';
+>>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
 
 const APP_SHELL = [
   './',
@@ -18,9 +22,14 @@ const APP_SHELL = [
   './app.js',
   './firebase-config.js',
   './manifest.json',
+<<<<<<< HEAD
   './assets/images/icon-192.png',
   './assets/images/icon-512.png',
   './assets/images/icon-512-maskable.png'
+=======
+  './icon-192.png',
+  './icon-512.png'
+>>>>>>> 17f255a43d5e014c55bd762a311f93eabc217895
 ];
 
 self.addEventListener('install', (event) => {
