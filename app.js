@@ -531,13 +531,20 @@ function gerarMensalidadesRecorrentes() {
           cli.isencoesDisponiveis = Number(cli.isencoesDisponiveis) - 1;
           cli.isencoesUsadas = (Number(cli.isencoesUsadas) || 0) + 1;
         } else {
-          charges.push({
+          let nova = {
             ...base,
             descricao: `Mensalidade ${competenciaLabel(mes)} — ${planoTxt}`,
             valor: Number(cli.valorPlano),
             status: 'pendente', dataPagamento: null,
             formasPagamento: formasDaRecorrencia(cli, settings)
-          });
+          };
+          const pctGuardado = Number(cli.descontoProximaPct) || 0;
+          if (pctGuardado > 0) {
+            nova = comDescontoAntecipado(nova, pctGuardado);
+            cli.descontoProximaPct = 0;
+            cli.descontoProximaOrigem = null;
+          }
+          charges.push(nova);
         }
         ids.add(id);
         criadas++;
@@ -555,6 +562,61 @@ function gerarMensalidadesRecorrentes() {
     queuePersist();
   }
   return criadas;
+}
+
+// ---------- DESCONTO POR PAGAMENTO ANTECIPADO ----------
+// Pagou no dia do vencimento (ou depois): sem desconto.
+// 1 dia antes = 1%, 2 dias = 2%, 3 dias = 3%, 4 dias = 4%, 5 dias ou mais = 5%.
+// O desconto vale para a PRÓXIMA mensalidade do cliente (só mensalidades
+// recorrentes, e não as isentas por indicação).
+const DESCONTO_ANTECIPACAO_MAX = 5;
+
+function diasDeAntecedencia(vencimentoISO, pagamentoISO) {
+  if (!vencimentoISO || !pagamentoISO) return 0;
+  const v = new Date(vencimentoISO + 'T00:00:00');
+  const p = new Date(pagamentoISO + 'T00:00:00');
+  return Math.round((v - p) / 86400000);
+}
+function descontoPorAntecedencia(vencimentoISO, pagamentoISO) {
+  const dias = diasDeAntecedencia(vencimentoISO, pagamentoISO);
+  if (!(dias >= 1)) return 0;
+  return Math.min(dias, DESCONTO_ANTECIPACAO_MAX);
+}
+function cobrancaGeraDescontoAntecipado(charge) {
+  return !!(charge && charge.clientId && charge.tipo === 'mensalidade' && charge.recorrente && !charge.isenta && Number(charge.valor) > 0);
+}
+// Aplica o desconto (em %) no valor de uma cobrança ainda em aberto.
+function comDescontoAntecipado(charge, pct) {
+  const original = Number(charge.valorOriginal) > 0 ? Number(charge.valorOriginal) : Number(charge.valor);
+  return {
+    ...charge,
+    valorOriginal: original,
+    valor: Math.round(original * (1 - pct / 100) * 100) / 100,
+    descontoPct: pct,
+    descricao: charge.descricao + ` (${pct}% de desconto por pagamento antecipado)`
+  };
+}
+// Chamado quando uma mensalidade é marcada como paga. Se foi paga antes do
+// vencimento, aplica o desconto na próxima mensalidade em aberto do cliente —
+// ou guarda no cliente, para ser usado quando a próxima for lançada.
+// Retorna { pct, dias, aplicadaAgora } ou null.
+function concederDescontoAntecipado(charge) {
+  if (!cobrancaGeraDescontoAntecipado(charge)) return null;
+  const pct = descontoPorAntecedencia(charge.vencimento, charge.dataPagamento);
+  if (pct <= 0) return null;
+  const dias = diasDeAntecedencia(charge.vencimento, charge.dataPagamento);
+  const proxima = getCharges()
+    .filter(c => c.id !== charge.id && c.clientId === charge.clientId && c.tipo === 'mensalidade' && c.recorrente &&
+      c.status !== 'pago' && !c.isenta && !c.descontoPct && c.vencimento > charge.vencimento)
+    .sort((a, b) => a.vencimento.localeCompare(b.vencimento))[0];
+  if (proxima) {
+    saveCharges(getCharges().map(c => c.id === proxima.id ? comDescontoAntecipado(c, pct) : c));
+    return { pct, dias, aplicadaAgora: true };
+  }
+  saveClients(getClients().map(c => c.id !== charge.clientId ? c : {
+    ...c, descontoProximaPct: pct, descontoProximaOrigem: charge.competencia || charge.vencimento.slice(0, 7)
+  }));
+  return { pct, dias, aplicadaAgora: false };
 }
 
 // Chamado quando uma cobrança é marcada como paga. Se for a 1ª mensalidade
@@ -1836,6 +1898,7 @@ function renderClienteDetalhe(clientId) {
         <div class="stat-label">Plano</div>
         <div class="stat-value" style="font-size:16px;">${client.plano ? escapeHtml(client.plano) : '—'}</div>
         ${client.valorPlano != null ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(client.valorPlano)}/mês</div>` : ''}
+        ${Number(client.descontoProximaPct) > 0 ? `<div class="view-desc" style="margin-top:4px;">🎁 ${Number(client.descontoProximaPct)}% de desconto já garantido na próxima mensalidade (pagamento antecipado)</div>` : ''}
         ${client.recorrente ? `<div class="view-desc" style="margin-top:4px;">🔁 Lançamento automático, vence dia ${diaVencimentoValido(client.diaVencimento)} · paga via ${{ pix: 'Pix', boleto: 'boleto', cartao: 'cartão' }[formaRecorrenciaDoCliente(client)]}</div>` : ''}
         ${client.pixChave ? `<div class="view-desc" style="margin-top:4px;">🔑 Pix próprio: ${escapeHtml(client.pixChave)}</div>` : ''}
       </div>
@@ -2198,6 +2261,7 @@ function openMarkPaidModal(chargeId) {
     <div class="field">
       <label class="field-label">Data do pagamento</label>
       <input class="input" type="date" id="mpData" value="${todayISO()}">
+      <div class="view-desc" id="mpDescontoInfo" style="margin-top:6px;"></div>
     </div>
     <div class="field">
       <label class="field-label">Link do comprovante (opcional)</label>
@@ -2209,6 +2273,20 @@ function openMarkPaidModal(chargeId) {
     </div>
   `);
   qs('#btnCancelPago').onclick = closeModal;
+  const atualizarInfoDesconto = () => {
+    const el = qs('#mpDescontoInfo');
+    if (!el) return;
+    if (!cobrancaGeraDescontoAntecipado(charge)) { el.textContent = ''; return; }
+    const dataPg = qs('#mpData').value || todayISO();
+    const pct = descontoPorAntecedencia(charge.vencimento, dataPg);
+    const dias = diasDeAntecedencia(charge.vencimento, dataPg);
+    el.textContent = pct > 0
+      ? `🎁 Pago ${dias} dia${dias > 1 ? 's' : ''} antes do vencimento: o cliente ganha ${pct}% de desconto na próxima mensalidade.`
+      : 'Pagamento no dia do vencimento (ou depois): sem desconto na próxima mensalidade.';
+  };
+  qs('#mpData').addEventListener('input', atualizarInfoDesconto);
+  qs('#mpData').addEventListener('change', atualizarInfoDesconto);
+  atualizarInfoDesconto();
   qs('#btnConfirmPago').onclick = () => {
     let link = qs('#mpComprovante').value.trim();
     if (link && !/^https?:\/\//i.test(link)) link = 'https://' + link;
@@ -2220,7 +2298,12 @@ function openMarkPaidModal(chargeId) {
     charges[idx].formaPagamentoUsada = qs('#mpForma').value;
     saveCharges(charges);
     const premiado = concederIsencaoPorIndicacao(charges[idx]);
+    const descontoAntecipado = concederDescontoAntecipado(charges[idx]);
     closeModal();
+    if (descontoAntecipado) {
+      const cliDesc = clientById(charges[idx].clientId);
+      alert(`🎁 Pagamento ${descontoAntecipado.dias} dia${descontoAntecipado.dias > 1 ? 's' : ''} antes do vencimento: ${cliDesc ? cliDesc.nome : 'o cliente'} ganhou ${descontoAntecipado.pct}% de desconto na próxima mensalidade${descontoAntecipado.aplicadaAgora ? ' (já aplicado na cobrança em aberto).' : ' (será aplicado quando ela for lançada).'}`);
+    }
     if (premiado) alert(`🎁 ${premiado} ganhou 1 mensalidade isenta por essa indicação! Ela será usada na próxima mensalidade recorrente dele(a) — ou use o botão "Isentar" numa mensalidade em aberto.`);
     const cliPago = charges[idx].clientId ? clientById(charges[idx].clientId) : null;
     if (charges[idx].recorrente && cliPago && formaRecorrenciaDoCliente(cliPago) !== 'pix') {
@@ -2870,6 +2953,8 @@ Passando para lembrar da sua *mensalidade de {competencia}* ({plano}) 🧾
 💰 *Valor:* {valor}
 📅 *Vencimento:* {vencimento_relativo} ({vencimento_data})
 {atraso}{pagamento}
+
+🎁 *Pague antes e ganhe desconto na próxima mensalidade:* 1 dia antes = 1%, 2 dias = 2%, 3 dias = 3%, 4 dias = 4% e 5 dias ou mais = 5%.
 
 Se o pagamento já foi realizado, pode desconsiderar esta mensagem.
 
