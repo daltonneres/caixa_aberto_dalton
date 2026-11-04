@@ -938,6 +938,7 @@ function navigate(view) {
     mensalidades: renderMensalidades, // atalho antigo: abre a aba dentro de Serviços
     negociacoes: renderNegociacoes,
     relatorios: renderRelatorios,
+    repositorios: renderRepositorios,
     contratos: renderContratos,
     config: renderConfig
   };
@@ -1651,6 +1652,31 @@ function openClientModal(id, onSaved) {
       </div>
 
       <div class="field">
+        <label class="field-label">Cobrança</label>
+        <select class="input" id="cTipoCobranca">
+          <option value="unitaria" ${editing && editing.cobrancaDividida ? '' : 'selected'}>Unitária (um só responsável)</option>
+          <option value="dividida" ${editing && editing.cobrancaDividida ? 'selected' : ''}>Dividida (duas pessoas dividem o valor)</option>
+        </select>
+      </div>
+      <div id="cDivisaoRow" style="${editing && editing.cobrancaDividida ? '' : 'display:none;'}">
+        <div class="field-row">
+          <div class="field">
+            <label class="field-label">Nome da 1ª pessoa</label>
+            <input class="input" id="cDivNome1" value="${editing && editing.divisao ? escapeHtml(editing.divisao.nome1 || '') : ''}">
+          </div>
+          <div class="field">
+            <label class="field-label">Parte da 1ª (%)</label>
+            <input class="input" type="number" min="1" max="99" step="0.01" id="cDivPct1" value="${editing && editing.divisao && editing.divisao.pct1 != null ? editing.divisao.pct1 : 50}">
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label">Nome da 2ª pessoa (fica com o restante)</label>
+          <input class="input" id="cDivNome2" value="${editing && editing.divisao ? escapeHtml(editing.divisao.nome2 || '') : ''}">
+          <div class="view-desc" style="margin-top:4px;">A mensagem sai igual, só com a parte de cada uma discriminada abaixo do valor.</div>
+        </div>
+      </div>
+
+      <div class="field">
         <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer;">
           <input type="checkbox" id="cRecorrente" ${editing && editing.recorrente ? 'checked' : ''}>
           <span>🔁 Lançar a mensalidade automaticamente todo mês</span>
@@ -1736,6 +1762,9 @@ function openClientModal(id, onSaved) {
     qs('#cPixRow').style.display = rec && qs('#cFormaRec').value === 'pix' ? '' : 'none';
   };
   qs('#cRecorrente').onchange = atualizarRecVisivel;
+  qs('#cTipoCobranca').onchange = () => {
+    qs('#cDivisaoRow').style.display = qs('#cTipoCobranca').value === 'dividida' ? '' : 'none';
+  };
   qs('#cFormaRec').onchange = atualizarRecVisivel;
   qs('#clientForm').onsubmit = (e) => {
     e.preventDefault();
@@ -1806,6 +1835,15 @@ function openClientModal(id, onSaved) {
       return;
     }
 
+    const divididaCli = qs('#cTipoCobranca').value === 'dividida';
+    const divNome1 = qs('#cDivNome1').value.trim();
+    const divNome2 = qs('#cDivNome2').value.trim();
+    const divPct1 = Number(qs('#cDivPct1').value);
+    if (divididaCli) {
+      if (!divNome1 || !divNome2) { alert('Informe o nome das duas pessoas que dividem a cobrança.'); return; }
+      if (!(divPct1 > 0 && divPct1 < 100)) { alert('A parte da 1ª pessoa deve ficar entre 0% e 100%.'); return; }
+    }
+
     const clients = getClients();
     const extra = {
       tipo: tipoCliente,
@@ -1827,7 +1865,9 @@ function openClientModal(id, onSaved) {
       recorrenciaInicio: qs('#cRecInicio').value || todayISO().slice(0, 7),
       pixChave: pixChaveRaw,
       pixTitular: qs('#cPixTitular').value.trim(),
-      formaPagamentoRecorrente: qs('#cFormaRec').value
+      formaPagamentoRecorrente: qs('#cFormaRec').value,
+      cobrancaDividida: divididaCli,
+      divisao: divididaCli ? { nome1: divNome1, nome2: divNome2, pct1: divPct1 } : null
     };
     if (editing) {
       const idx = clients.findIndex(c => c.id === editing.id);
@@ -1899,6 +1939,7 @@ function renderClienteDetalhe(clientId) {
         <div class="stat-value" style="font-size:16px;">${client.plano ? escapeHtml(client.plano) : '—'}</div>
         ${client.valorPlano != null ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(client.valorPlano)}/mês</div>` : ''}
         ${Number(client.descontoProximaPct) > 0 ? `<div class="view-desc" style="margin-top:4px;">🎁 ${Number(client.descontoProximaPct)}% de desconto já garantido na próxima mensalidade (pagamento antecipado)</div>` : ''}
+        ${client.cobrancaDividida && client.divisao ? `<div class="view-desc" style="margin-top:4px;">👥 Cobrança dividida: ${escapeHtml(client.divisao.nome1)} (${client.divisao.pct1}%) e ${escapeHtml(client.divisao.nome2)} (${Math.round((100 - client.divisao.pct1) * 100) / 100}%)</div>` : ''}
         ${client.recorrente ? `<div class="view-desc" style="margin-top:4px;">🔁 Lançamento automático, vence dia ${diaVencimentoValido(client.diaVencimento)} · paga via ${{ pix: 'Pix', boleto: 'boleto', cartao: 'cartão' }[formaRecorrenciaDoCliente(client)]}</div>` : ''}
         ${client.pixChave ? `<div class="view-desc" style="margin-top:4px;">🔑 Pix próprio: ${escapeHtml(client.pixChave)}</div>` : ''}
       </div>
@@ -2914,6 +2955,30 @@ function openMeetingModal(meetingId, presetClientId, onSaved) {
 
 // ---------- ENVIO WHATSAPP ----------
 // obs: WhatsApp usa *asterisco* pra deixar o texto em negrito
+// Aviso de bloqueio + rodapé de mensagem automática (entram nas mensagens de cobrança)
+const AVISO_BLOQUEIO_TEXTO =
+`⚠️ *Importante:* caso o pagamento não seja identificado até as *18h do dia do vencimento*, o sistema é *automaticamente bloqueado*, sendo liberado somente após a identificação do pagamento, com prazo de liberação de até *48h*.`;
+
+function emitidaEmLabel(d) {
+  d = d || new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} - ${p(d.getHours())}:${p(d.getMinutes())}h`;
+}
+function rodapeAutomaticoTexto() {
+  return `_Esta é uma mensagem automática, gerada pelo Software Caixa Aberto | Dalton Neres._\n_Emitida em: ${emitidaEmLabel()}_`;
+}
+
+// Cobrança dividida (ex.: escola com duas responsáveis): discrimina a parte de cada uma.
+function linhaDivisaoCobranca(charge, client) {
+  if (!client || !client.cobrancaDividida || !client.divisao) return '';
+  const total = Number(charge.valor) || 0;
+  if (charge.isenta || !(total > 0)) return '';
+  const d = client.divisao;
+  const parte1 = Math.round(total * (Number(d.pct1) || 50)) / 100;
+  const parte2 = Math.round((total - parte1) * 100) / 100;
+  return `👥 *Cobrança dividida:*\n   • ${d.nome1}: *${formatCurrency(parte1)}*\n   • ${d.nome2}: *${formatCurrency(parte2)}*\n`;
+}
+
 const MODELO_COBRANCA_PADRAO =
 `Oi, {nome}! Tudo bem? 😊
 
@@ -2922,12 +2987,16 @@ Aqui é a *NetBug | Assistente de IA do Dalton Neres*.
 Passando para lembrar da sua *{descricao}* 🧾
 
 💰 *Valor:* {valor}
-📅 *Vencimento:* {vencimento_relativo} ({vencimento_data})
+{divisao}📅 *Vencimento:* {vencimento_relativo} ({vencimento_data})
 {atraso}{pagamento}
+
+{aviso_bloqueio}
 
 Se o pagamento já foi realizado, pode desconsiderar esta mensagem.
 
-Qualquer dúvida, ficamos à disposição! 🙏`;
+Qualquer dúvida, ficamos à disposição! 🙏
+
+{rodape_automatico}`;
 
 function renderTemplate(template, vars) {
   return String(template || '').replace(/\{(\w+)\}/g, (m, key) => (vars[key] != null ? vars[key] : ''));
@@ -2951,14 +3020,18 @@ Aqui é a *NetBug | Assistente de IA do Dalton Neres*.
 Passando para lembrar da sua *mensalidade de {competencia}* ({plano}) 🧾
 
 💰 *Valor:* {valor}
-📅 *Vencimento:* {vencimento_relativo} ({vencimento_data})
+{divisao}📅 *Vencimento:* {vencimento_relativo} ({vencimento_data})
 {atraso}{pagamento}
 
 🎁 *Pague antes e ganhe desconto na próxima mensalidade:* 1 dia antes = 1%, 2 dias = 2%, 3 dias = 3%, 4 dias = 4% e 5 dias ou mais = 5%.
 
+{aviso_bloqueio}
+
 Se o pagamento já foi realizado, pode desconsiderar esta mensagem.
 
-Qualquer dúvida, ficamos à disposição! 🙏`;
+Qualquer dúvida, ficamos à disposição! 🙏
+
+{rodape_automatico}`;
 
 function buildLinhasPagamento(charge, settings) {
   // Compatibilidade: cobranças criadas antes dessa opção existir não têm
@@ -3017,7 +3090,10 @@ function montarVariaveisMensagemCobranca(charge, client, settings) {
     atraso,
     pagamento,
     competencia: charge.competencia ? competenciaLabel(charge.competencia) : String(charge.vencimento || '').slice(5, 7) + '/' + String(charge.vencimento || '').slice(0, 4),
-    plano: (client && client.plano) || ''
+    plano: (client && client.plano) || '',
+    divisao: linhaDivisaoCobranca(charge, client),
+    aviso_bloqueio: AVISO_BLOQUEIO_TEXTO,
+    rodape_automatico: rodapeAutomaticoTexto()
   };
 }
 
@@ -3027,7 +3103,17 @@ function buildMessage(charge, client) {
   const template = clienteEhRecorrente(charge, client)
     ? (settings.modeloCobrancaRecorrente || MODELO_RECORRENTE_PADRAO)
     : (settings.modeloCobranca || MODELO_COBRANCA_PADRAO);
-  return renderTemplate(template, montarVariaveisMensagemCobranca(charge, client, settings));
+  // Modelos personalizados salvos antes dessa atualização não têm os novos campos:
+  // o aviso de bloqueio e o rodapé automático são acrescentados mesmo assim.
+  let modelo = template;
+  if (!modelo.includes('{divisao}')) {
+    modelo = /\{valor\}.*\n/.test(modelo)
+      ? modelo.replace(/(\{valor\}.*\n)/, '$1{divisao}')
+      : modelo + '\n\n{divisao}';
+  }
+  if (!modelo.includes('{aviso_bloqueio}')) modelo += '\n\n{aviso_bloqueio}';
+  if (!modelo.includes('{rodape_automatico}')) modelo += '\n\n{rodape_automatico}';
+  return renderTemplate(modelo, montarVariaveisMensagemCobranca(charge, client, settings));
 }
 
 function openWhatsappModal(chargeId) {
@@ -4500,6 +4586,242 @@ function openNegociacaoModal(id) {
 }
 
 // ---------- RELATÓRIOS ----------
+// ---------- REPOSITÓRIOS DOS CLIENTES + BLOQUEIO POR FALTA DE PAGAMENTO ----------
+// Cada cliente pode ter um ou mais repositórios (link). Se o pagamento não foi
+// identificado (venceu e já passou das 18h do dia, ou está atrasado), o cliente
+// aparece em destaque: dá pra abrir o repositório direto dali, fazer o bloqueio
+// e registrar aqui que ele foi bloqueado (e depois liberar, após o pagamento).
+let _repoFiltro = { busca: '', filtro: 'todos' };
+
+function normalizarUrlRepo(u) {
+  u = String(u || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  try {
+    const x = new URL(u);
+    return /^https?:$/.test(x.protocol) ? x.href : '';
+  } catch (e) { return ''; }
+}
+
+// Cobrança em aberto cujo pagamento "não foi identificado": venceu antes de hoje,
+// ou vence hoje e já passou das 18h.
+function cobrancaNaoIdentificada(client) {
+  const hoje = hojeLocalISO();
+  const passou18 = new Date().getHours() >= 18;
+  return getCharges()
+    .filter(c => c.clientId === client.id && c.status !== 'pago' && !c.isenta && Number(c.valor) > 0 &&
+      c.vencimento && (c.vencimento < hoje || (c.vencimento === hoje && passou18)))
+    .sort((a, b) => a.vencimento.localeCompare(b.vencimento))[0] || null;
+}
+
+function dataHoraBR(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}h`;
+}
+
+function statusRepositorio(client) {
+  const bloqueado = !!(client.bloqueio && client.bloqueio.ativo);
+  const pend = cobrancaNaoIdentificada(client);
+  if (bloqueado && !pend) return { chave: 'liberar', prioridade: 1, bloqueado, pend };
+  if (bloqueado) return { chave: 'bloqueado', prioridade: 2, bloqueado, pend };
+  if (pend) return { chave: 'atencao', prioridade: 0, bloqueado, pend };
+  return { chave: 'ok', prioridade: 3, bloqueado, pend };
+}
+
+function renderRepositorios() {
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Repositórios</div>
+        <div class="view-desc">Acesse o repositório de cada cliente e controle o bloqueio quando o pagamento não for identificado</div>
+      </div>
+      <button class="btn btn-ghost" id="btnRepAddCli">+ Adicionar cliente à tela</button>
+    </div>
+    <div class="field-row" style="margin-bottom:14px;">
+      <div class="field">
+        <input class="input" id="repBusca" placeholder="Buscar cliente..." value="${escapeHtml(_repoFiltro.busca)}">
+      </div>
+      <div class="field">
+        <select class="input" id="repFiltro">
+          <option value="todos" ${_repoFiltro.filtro === 'todos' ? 'selected' : ''}>Todos os clientes</option>
+          <option value="atencao" ${_repoFiltro.filtro === 'atencao' ? 'selected' : ''}>Pagamento não identificado</option>
+          <option value="bloqueados" ${_repoFiltro.filtro === 'bloqueados' ? 'selected' : ''}>Bloqueados</option>
+        </select>
+      </div>
+    </div>
+    <div id="repLista"></div>
+  `;
+
+  function pintar() {
+    const busca = _repoFiltro.busca.trim().toLowerCase();
+    let lista = getClients()
+      .filter(c => !c.repoOculto)
+      .map(c => ({ c, st: statusRepositorio(c) }))
+      .filter(x => !busca || String(x.c.nome || '').toLowerCase().includes(busca));
+    if (_repoFiltro.filtro === 'atencao') lista = lista.filter(x => x.st.chave === 'atencao');
+    if (_repoFiltro.filtro === 'bloqueados') lista = lista.filter(x => x.st.bloqueado);
+    lista.sort((a, b) => a.st.prioridade - b.st.prioridade || String(a.c.nome).localeCompare(String(b.c.nome)));
+
+    const atencao = getClients().filter(c => !c.repoOculto && statusRepositorio(c).chave === 'atencao').length;
+    const aviso = atencao
+      ? `<div class="view-desc" style="margin-bottom:12px; color:var(--brick); font-weight:600;">⚠️ ${atencao} cliente${atencao > 1 ? 's' : ''} com pagamento não identificado</div>`
+      : '';
+
+    qs('#repLista').innerHTML = aviso + (lista.length === 0
+      ? emptyState('Nenhum cliente aqui', 'Nada encontrado com esse filtro.')
+      : `<div class="ledger">${lista.map(({ c, st }) => {
+        const repos = (c.repositorios || []).filter(r => r && r.url);
+        let badge, info = '';
+        if (st.chave === 'atencao') {
+          badge = '<span class="stamp-badge stamp-atrasado">Pagamento não identificado</span>';
+          info = `${escapeHtml(st.pend.descricao || 'Cobrança')} · venceu ${formatDateBR(st.pend.vencimento)} · ${formatCurrency(st.pend.valor)}`;
+        } else if (st.chave === 'bloqueado') {
+          badge = '<span class="stamp-badge stamp-atrasado">🔒 Bloqueado</span>';
+          info = `desde ${dataHoraBR(c.bloqueio.desde)} · pagamento ainda não identificado`;
+        } else if (st.chave === 'liberar') {
+          badge = '<span class="stamp-badge stamp-pendente">🔒 Bloqueado — pago, liberar</span>';
+          info = `bloqueado desde ${dataHoraBR(c.bloqueio.desde)} · pagamento identificado, liberar em até 48h`;
+        } else {
+          badge = '<span class="stamp-badge stamp-pago">Em dia</span>';
+          if (c.bloqueio && c.bloqueio.liberadoEm) info = `liberado em ${dataHoraBR(c.bloqueio.liberadoEm)}`;
+        }
+        const links = repos.length
+          ? repos.map(r => `<a class="btn btn-ghost btn-sm" href="${escapeHtml(r.url)}" target="_blank" rel="noopener noreferrer">↗ ${escapeHtml(r.nome || 'Repositório')}</a>`).join('')
+          : '';
+        return `
+          <div class="ledger-row" style="flex-wrap:wrap;">
+            <div class="ledger-main">
+              <div class="ledger-title">${escapeHtml(c.nome)}</div>
+              <div class="ledger-sub">${info || (repos.length ? '' : 'Nenhum repositório cadastrado')}</div>
+            </div>
+            ${badge}
+            <div class="ledger-actions" style="flex-wrap:wrap;">
+              ${links}
+              <button class="btn btn-ghost btn-sm" data-repos-edit="${c.id}">${repos.length ? 'Editar links' : '+ Repositório'}</button>
+              ${st.bloqueado
+                ? `<button class="btn btn-primary btn-sm" data-repo-liberar="${c.id}">Liberar</button>`
+                : `<button class="btn btn-danger btn-sm" data-repo-bloquear="${c.id}">Marcar bloqueado</button>`}
+              <button class="btn btn-ghost btn-sm" data-repo-ocultar="${c.id}" title="Tira o cliente desta tela (não exclui o cliente)">Remover da tela</button>
+            </div>
+          </div>`;
+      }).join('')}</div>`);
+
+    qsa('[data-repos-edit]').forEach(b => b.onclick = () => openRepositoriosModal(b.dataset.reposEdit, pintar));
+    qsa('[data-repo-ocultar]').forEach(b => b.onclick = () => {
+      const cli = clientById(b.dataset.repoOcultar);
+      if (!confirm(`Tirar ${cli.nome} desta tela?\n\nO cliente NÃO é excluído, só deixa de aparecer em Repositórios. Você pode trazer de volta em "+ Adicionar cliente à tela".`)) return;
+      saveClients(getClients().map(x => x.id === cli.id ? { ...x, repoOculto: true } : x));
+      pintar();
+    });
+    qsa('[data-repo-bloquear]').forEach(b => b.onclick = () => {
+      const cli = clientById(b.dataset.repoBloquear);
+      if (!confirm(`Registrar o bloqueio de ${cli.nome}?\n\n(Faça o bloqueio no repositório e confirme aqui para ficar registrado.)`)) return;
+      saveClients(getClients().map(x => x.id === cli.id
+        ? { ...x, bloqueio: { ativo: true, desde: new Date().toISOString(), liberadoEm: null } } : x));
+      pintar();
+    });
+    qsa('[data-repo-liberar]').forEach(b => b.onclick = () => {
+      const cli = clientById(b.dataset.repoLiberar);
+      const aindaPend = cobrancaNaoIdentificada(cli);
+      if (aindaPend && !confirm(`${cli.nome} ainda tem cobrança em aberto sem pagamento identificado. Liberar mesmo assim?`)) return;
+      saveClients(getClients().map(x => x.id === cli.id
+        ? { ...x, bloqueio: { ...(x.bloqueio || {}), ativo: false, liberadoEm: new Date().toISOString() } } : x));
+      pintar();
+    });
+  }
+
+  qs('#btnRepAddCli').onclick = () => openAdicionarClientesRepoModal(pintar);
+  qs('#repBusca').oninput = (e) => { _repoFiltro.busca = e.target.value; pintar(); };
+  qs('#repFiltro').onchange = (e) => { _repoFiltro.filtro = e.target.value; pintar(); };
+  pintar();
+}
+
+function openAdicionarClientesRepoModal(onSaved) {
+  const ocultos = getClients().filter(c => c.repoOculto).sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
+  openModal(`
+    <div class="modal-title">Adicionar cliente à tela</div>
+    ${ocultos.length === 0
+      ? `<div class="view-desc" style="margin-bottom:14px;">Todos os clientes já estão na tela. Para tirar algum, use <b>Remover da tela</b> na linha dele.</div>
+         <div class="modal-actions"><button type="button" class="btn btn-ghost" id="btnRepAddFechar">Fechar</button></div>`
+      : `<form id="repAddForm">
+          <div class="view-desc" style="margin-bottom:10px;">Marque os clientes que devem voltar para a tela de Repositórios.</div>
+          <div style="max-height:320px; overflow:auto; margin-bottom:14px;">
+            ${ocultos.map(c => `
+              <label style="display:flex; align-items:center; gap:8px; padding:6px 0; font-size:14px; cursor:pointer;">
+                <input type="checkbox" class="rep-add-chk" value="${c.id}">
+                <span>${escapeHtml(c.nome)}</span>
+              </label>`).join('')}
+          </div>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" id="btnRepAddFechar">Cancelar</button>
+            <button type="submit" class="btn btn-primary">Adicionar</button>
+          </div>
+        </form>`}
+  `);
+  qs('#btnRepAddFechar').onclick = closeModal;
+  const form = qs('#repAddForm');
+  if (form) form.onsubmit = (e) => {
+    e.preventDefault();
+    const ids = qsa('.rep-add-chk').filter(x => x.checked).map(x => x.value);
+    if (!ids.length) { closeModal(); return; }
+    saveClients(getClients().map(x => ids.includes(x.id) ? { ...x, repoOculto: false } : x));
+    closeModal();
+    if (onSaved) onSaved();
+  };
+}
+
+function openRepositoriosModal(clientId, onSaved) {
+  const cli = clientById(clientId);
+  if (!cli) return;
+  openModal(`
+    <div class="modal-title">Repositórios — ${escapeHtml(cli.nome)}</div>
+    <form id="repForm">
+      <div id="repRows"></div>
+      <button type="button" class="btn btn-ghost btn-sm" id="btnRepAdd" style="margin-bottom:14px;">+ Adicionar outro link</button>
+      <div class="view-desc" style="margin-bottom:10px;">Cole o link do repositório (GitHub, painel de hospedagem etc.). Use o ✕ para excluir um link e + Adicionar outro link para incluir mais.</div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnRepCancel">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Salvar</button>
+      </div>
+    </form>
+  `);
+  const rows = qs('#repRows');
+  function addRow(nome, url) {
+    const div = document.createElement('div');
+    div.className = 'field-row';
+    div.innerHTML = `
+      <div class="field"><input class="input rep-nome" placeholder="Nome (ex: Site)" value="${escapeHtml(nome || '')}"></div>
+      <div class="field"><input class="input rep-url" placeholder="https://github.com/..." value="${escapeHtml(url || '')}"></div>
+      <button type="button" class="btn btn-danger btn-sm rep-del" title="Excluir este link" style="align-self:flex-start;">✕</button>`;
+    div.querySelector('.rep-del').onclick = () => div.remove();
+    rows.appendChild(div);
+  }
+  const atuais = (cli.repositorios || []).filter(r => r && r.url);
+  (atuais.length ? atuais : [{}]).forEach(r => addRow(r.nome, r.url));
+  qs('#btnRepAdd').onclick = () => addRow('', '');
+  qs('#btnRepCancel').onclick = closeModal;
+  qs('#repForm').onsubmit = (e) => {
+    e.preventDefault();
+    const lista = [];
+    let invalido = false;
+    qsa('#repRows .field-row').forEach(row => {
+      const nome = row.querySelector('.rep-nome').value.trim();
+      const bruto = row.querySelector('.rep-url').value.trim();
+      if (!bruto) return;
+      const url = normalizarUrlRepo(bruto);
+      if (!url) { invalido = true; return; }
+      lista.push({ nome: nome || 'Repositório', url });
+    });
+    if (invalido) { alert('Um dos links não parece válido. Confira e tente de novo.'); return; }
+    saveClients(getClients().map(x => x.id === cli.id ? { ...x, repositorios: lista } : x));
+    closeModal();
+    if (onSaved) onSaved();
+  };
+}
+
 function renderRelatorios() {
   const charges = getCharges();
   const hoje = new Date();
@@ -5182,7 +5504,7 @@ function renderConfig() {
       são preenchidas automaticamente:
     </p>
     <p class="view-desc" style="margin-bottom:14px; font-family:var(--font-mono); font-size:12px;">
-      {nome} {quem_fala} {descricao} {valor} {vencimento_data} {vencimento_relativo} {atraso} {pagamento}
+      {nome} {quem_fala} {descricao} {valor} {divisao} {vencimento_data} {vencimento_relativo} {atraso} {pagamento} {aviso_bloqueio} {rodape_automatico}
     </p>
     <form id="modeloCobrancaForm" style="max-width:520px; margin-bottom:12px;">
       <div class="field">
@@ -5202,7 +5524,7 @@ function renderConfig() {
       conforme o cliente paga (Pix, boleto ou cartão). Variáveis extras:
     </p>
     <p class="view-desc" style="margin-bottom:14px; font-family:var(--font-mono); font-size:12px;">
-      {nome} {quem_fala} {plano} {competencia} {valor} {vencimento_data} {vencimento_relativo} {atraso} {pagamento}
+      {nome} {quem_fala} {plano} {competencia} {valor} {divisao} {vencimento_data} {vencimento_relativo} {atraso} {pagamento} {aviso_bloqueio} {rodape_automatico}
     </p>
     <form id="modeloRecorrenteForm" style="max-width:520px; margin-bottom:12px;">
       <div class="field">
