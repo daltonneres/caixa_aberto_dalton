@@ -2828,7 +2828,7 @@ function clienteUsaSistema(client) {
 }
 
 const MODELO_COBRANCA_PADRAO =
-`Oi, {nome}! Tudo bem? 😊
+`Olá, {nome}! Tudo bem? 😊
 
 Passando para lembrar da sua *{descricao}* 🧾
 
@@ -2838,7 +2838,9 @@ Passando para lembrar da sua *{descricao}* 🧾
 
 {aviso_bloqueio}
 
-Se já pagou, pode desconsiderar esta mensagem. Qualquer dúvida, é só chamar! 🙏`;
+Se já pagou, pode desconsiderar esta mensagem. Qualquer dúvida, é só chamar! 🙏
+
+{rodape_automatico}`;
 
 function renderTemplate(template, vars) {
   return String(template || '').replace(/\{(\w+)\}/g, (m, key) => (vars[key] != null ? vars[key] : ''));
@@ -2854,7 +2856,7 @@ function pixChaveRotulo(chave) {
 }
 
 const MODELO_RECORRENTE_PADRAO =
-`Oi, {nome}! Tudo bem? 😊
+`Olá, {nome}! Tudo bem? 😊
 
 Passando para lembrar da sua *mensalidade de {competencia}* ({plano}) 🧾
 
@@ -2864,11 +2866,13 @@ Passando para lembrar da sua *mensalidade de {competencia}* ({plano}) 🧾
 
 {aviso_bloqueio}
 
-Se já pagou, pode desconsiderar esta mensagem. Qualquer dúvida, é só chamar! 🙏`;
+Se já pagou, pode desconsiderar esta mensagem. Qualquer dúvida, é só chamar! 🙏
+
+{rodape_automatico}`;
 
 // Modelos salvos antes desta versão (com a "montoeira" de avisos) são ignorados
 // em favor do novo padrão enxuto; ao salvar de novo, vale o que a pessoa escrever.
-const MODELO_VERSAO = 2;
+const MODELO_VERSAO = 3;
 function modeloCobrancaAtual(s) {
   return (s.modeloVersao === MODELO_VERSAO && s.modeloCobranca) ? s.modeloCobranca : MODELO_COBRANCA_PADRAO;
 }
@@ -2930,7 +2934,7 @@ function montarVariaveisMensagemCobranca(charge, client, settings) {
     divisao: linhaDivisaoCobranca(charge, client),
     // Bloqueio só vale pra quem usa sistema; pra os outros, a linha some.
     aviso_bloqueio: clienteUsaSistema(client) ? AVISO_BLOQUEIO_TEXTO : '',
-    rodape_automatico: ''
+    rodape_automatico: rodapeAutomaticoTexto()
   };
 }
 
@@ -2944,6 +2948,7 @@ function buildMessage(charge, client) {
       : modelo + '\n\n{divisao}';
   }
   if (!modelo.includes('{aviso_bloqueio}')) modelo += '\n\n{aviso_bloqueio}';
+  if (!modelo.includes('{rodape_automatico}')) modelo += '\n\n{rodape_automatico}';
   // Linhas vazias (ex.: sem aviso de bloqueio) não deixam buraco na mensagem.
   return renderTemplate(modelo, montarVariaveisMensagemCobranca(charge, client, settings))
     .replace(/\n{3,}/g, '\n\n').trim();
@@ -5282,7 +5287,7 @@ function renderConfig() {
       são preenchidas automaticamente:
     </p>
     <p class="view-desc" style="margin-bottom:14px; font-family:var(--font-mono); font-size:12px;">
-      {nome} {quem_fala} {descricao} {valor} {divisao} {vencimento_data} {vencimento_relativo} {pagamento} {aviso_bloqueio}
+      {nome} {quem_fala} {descricao} {valor} {divisao} {vencimento_data} {vencimento_relativo} {pagamento} {aviso_bloqueio} {rodape_automatico}
     </p>
     <form id="modeloCobrancaForm" style="max-width:520px; margin-bottom:12px;">
       <div class="field">
@@ -5302,7 +5307,7 @@ function renderConfig() {
       conforme o cliente paga (Pix, boleto ou cartão). Variáveis extras:
     </p>
     <p class="view-desc" style="margin-bottom:14px; font-family:var(--font-mono); font-size:12px;">
-      {nome} {quem_fala} {plano} {competencia} {valor} {divisao} {vencimento_data} {vencimento_relativo} {pagamento} {aviso_bloqueio}
+      {nome} {quem_fala} {plano} {competencia} {valor} {divisao} {vencimento_data} {vencimento_relativo} {pagamento} {aviso_bloqueio} {rodape_automatico}
     </p>
     <form id="modeloRecorrenteForm" style="max-width:520px; margin-bottom:12px;">
       <div class="field">
