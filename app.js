@@ -286,164 +286,21 @@ function chargeStatus(charge) {
 }
 
 
-// ---------- PIX: chave própria por cliente + QR Code (BRCode) ----------
-// Cada cliente (principalmente os de mensalidade recorrente) pode ter uma chave
-// Pix diferente da chave geral das Configurações. O QR Code é um Pix "copia e
-// cola" estático, já com o valor da cobrança, gerado aqui no navegador.
-function cpfValido(d) {
-  if (!/^\d{11}$/.test(d) || /^(\d)\1{10}$/.test(d)) return false;
-  for (let t = 9; t < 11; t++) {
-    let soma = 0;
-    for (let i = 0; i < t; i++) soma += Number(d[i]) * (t + 1 - i);
-    if (((soma * 10) % 11) % 10 !== Number(d[t])) return false;
-  }
-  return true;
-}
-// Deixa a chave no formato que o Pix exige dentro do QR Code.
-function normalizarChavePix(raw) {
-  const s = String(raw || '').trim();
-  if (!s) return '';
-  if (s.includes('@')) return s.toLowerCase();
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return s.toLowerCase();
-  const d = onlyDigits(s);
-  if (s.startsWith('+')) return '+' + d;
-  if (/^\d{3}\.\d{3}\.\d{3}-\d{2}$/.test(s) || /^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$/.test(s)) return d;
-  if (d.length === 14) return d;
-  if (d.length === 11 && cpfValido(d) && !/[()]/.test(s)) return d;
-  if (d.length === 10 || d.length === 11) return '+55' + d;
-  if ((d.length === 12 || d.length === 13) && d.startsWith('55')) return '+' + d;
-  return s;
-}
-function pixCampo(id, valor) {
-  const v = String(valor);
-  return id + String(v.length).padStart(2, '0') + v;
-}
-function pixTextoSeguro(txt, max) {
-  return String(txt || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^A-Za-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase().slice(0, max);
-}
-function pixCRC16(str) {
-  let crc = 0xFFFF;
-  for (let i = 0; i < str.length; i++) {
-    crc ^= str.charCodeAt(i) << 8;
-    for (let j = 0; j < 8; j++) crc = (crc & 0x8000) ? (((crc << 1) ^ 0x1021) & 0xFFFF) : ((crc << 1) & 0xFFFF);
-  }
-  return crc.toString(16).toUpperCase().padStart(4, '0');
-}
-function gerarPixPayload({ chave, nome, cidade, valor, txid }) {
-  const conta = pixCampo('00', 'br.gov.bcb.pix') + pixCampo('01', chave);
-  let p = pixCampo('00', '01') + pixCampo('01', '11') + pixCampo('26', conta) +
-    pixCampo('52', '0000') + pixCampo('53', '986');
-  if (Number(valor) > 0) p += pixCampo('54', Number(valor).toFixed(2));
-  p += pixCampo('58', 'BR') +
-    pixCampo('59', pixTextoSeguro(nome, 25) || 'RECEBEDOR') +
-    pixCampo('60', pixTextoSeguro(cidade, 15) || 'BRASIL') +
-    pixCampo('62', pixCampo('05', (txid || '').replace(/[^A-Za-z0-9]/g, '').slice(-25) || '***'));
-  p += '6304';
-  return p + pixCRC16(p);
-}
-// Qual chave/titular/cidade usar numa cobrança: a do cliente, se tiver; senão a geral.
-function pixConfigParaCliente(client) {
+// ---------- PIX: só a chave, o banco e o titular (sem QR Code) ----------
+const PIX_BANCO_PADRAO = 'Banco Inter';
+const PIX_TITULAR_PADRAO = 'Dalton José Neres';
+function pixConfigParaCliente() {
   const s = getSettings();
-  const propria = !!(client && client.pixChave);
   return {
-    propria,
-    chaveExibida: propria ? client.pixChave : (s.pix || ''),
-    chave: normalizarChavePix(propria ? client.pixChave : s.pix),
-    nome: (propria && client.pixTitular) || s.empresaNome || s.seuNome || '',
-    cidade: s.pixCidade || ''
+    chaveExibida: s.pix || '',
+    chave: s.pix || '',
+    banco: s.pixBanco || PIX_BANCO_PADRAO,
+    titular: s.pixTitular || PIX_TITULAR_PADRAO
   };
 }
-function chargeAceitaPix(charge, client) {
+function chargeAceitaPix(charge) {
   const f = charge.formasPagamento;
-  if (!f) return true;
-  if (f.includes('pix')) return true;
-  return f.length === 0 && !!(client && client.pixChave);
-}
-function pixPayloadDaCobranca(charge) {
-  const client = charge.clientId ? clientById(charge.clientId) : null;
-  const cfg = pixConfigParaCliente(client);
-  if (!cfg.chave) return null;
-  return gerarPixPayload({ chave: cfg.chave, nome: cfg.nome, cidade: cfg.cidade, valor: charge.valor, txid: charge.id });
-}
-function pixQrCanvas(payload, escala = 8, margem = 4) {
-  if (typeof qrcode !== 'function') return null;
-  const qr = qrcode(0, 'M');
-  qr.addData(payload);
-  qr.make();
-  const n = qr.getModuleCount();
-  const c = document.createElement('canvas');
-  c.width = c.height = (n + margem * 2) * escala;
-  const ctx = c.getContext('2d');
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, c.width, c.height);
-  ctx.fillStyle = '#000';
-  for (let r = 0; r < n; r++) for (let col = 0; col < n; col++) {
-    if (qr.isDark(r, col)) ctx.fillRect((col + margem) * escala, (r + margem) * escala, escala, escala);
-  }
-  return c;
-}
-function copiarTexto(txt) {
-  if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(txt);
-  return new Promise((resolve) => {
-    const ta = document.createElement('textarea');
-    ta.value = txt; document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); } catch (e) {}
-    ta.remove(); resolve();
-  });
-}
-function openPixQrModal(chargeId) {
-  const charge = getCharges().find(c => c.id === chargeId);
-  if (!charge) return;
-  const client = charge.clientId ? clientById(charge.clientId) : null;
-  const nome = client ? client.nome : (charge.avulsoNome || 'Cliente');
-  const cfg = pixConfigParaCliente(client);
-  const payload = pixPayloadDaCobranca(charge);
-  if (!payload) { alert('Cadastre uma chave Pix (no cliente ou em Configurações) pra gerar o QR Code.'); return; }
-  const canvas = pixQrCanvas(payload);
-  if (!canvas) { alert('Não consegui carregar o gerador de QR Code. Confira a conexão e recarregue a página.'); return; }
-  openModal(`
-    <div class="modal-title">QR Code Pix — ${escapeHtml(nome)}</div>
-    <div class="pix-qr-box">
-      <img class="pix-qr-img" id="pixQrImg" alt="QR Code Pix" src="${canvas.toDataURL('image/png')}">
-      <div class="pix-qr-valor">${formatCurrency(charge.valor)}</div>
-      <div class="view-desc" style="margin:0; text-align:center;">${escapeHtml(charge.descricao)} · vence ${formatDateBR(charge.vencimento)}</div>
-      <div class="view-desc" style="margin:0; text-align:center;">${cfg.propria ? '🔑 Chave própria do cliente' : '🔑 Chave geral'}: <b>${escapeHtml(cfg.chaveExibida)}</b></div>
-    </div>
-    <div class="field" style="margin-top:14px;">
-      <label class="field-label">Pix copia e cola</label>
-      <textarea class="input pix-code" id="pixCodigo" readonly rows="4">${escapeHtml(payload)}</textarea>
-    </div>
-    <div class="modal-actions" style="flex-wrap:wrap;">
-      <button type="button" class="btn btn-ghost" id="btnPixFechar">Fechar</button>
-      <button type="button" class="btn btn-ghost" id="btnPixBaixar">⬇️ Baixar QR (PNG)</button>
-      <button type="button" class="btn btn-ghost hidden" id="btnPixCompartilhar">📤 Compartilhar imagem</button>
-      <button type="button" class="btn btn-primary" id="btnPixCopiar">📋 Copiar código</button>
-    </div>
-  `);
-  const nomeArq = `pix-${nome.replace(/\s+/g, '-').toLowerCase()}-${charge.vencimento}.png`;
-  qs('#btnPixFechar').onclick = closeModal;
-  qs('#btnPixCopiar').onclick = () => {
-    copiarTexto(payload).then(() => {
-      const b = qs('#btnPixCopiar');
-      if (b) { b.textContent = '✅ Copiado!'; setTimeout(() => { if (qs('#btnPixCopiar')) qs('#btnPixCopiar').textContent = '📋 Copiar código'; }, 1800); }
-    });
-  };
-  qs('#btnPixBaixar').onclick = () => {
-    const a = document.createElement('a');
-    a.href = canvas.toDataURL('image/png');
-    a.download = nomeArq;
-    a.click();
-  };
-  canvas.toBlob(blob => {
-    if (!blob) return;
-    const file = new File([blob], nomeArq, { type: 'image/png' });
-    if (navigator.canShare && navigator.canShare({ files: [file] }) && qs('#btnPixCompartilhar')) {
-      const b = qs('#btnPixCompartilhar');
-      b.classList.remove('hidden');
-      b.onclick = () => navigator.share({ files: [file], text: `Pix de ${formatCurrency(charge.valor)} — ${charge.descricao}` }).catch(() => {});
-    }
-  });
+  return !f || f.includes('pix');
 }
 
 // ---------- MENSALIDADES RECORRENTES + INDICAÇÕES ----------
@@ -478,7 +335,7 @@ function formasDaRecorrencia(cli, settings) {
   const f = formaRecorrenciaDoCliente(cli);
   if (f === 'boleto') return ['boleto'];
   if (f === 'cartao') return ['cartao'];
-  return (settings.pix || cli.pixChave) ? ['pix'] : [];
+  return settings.pix ? ['pix'] : [];
 }
 // Quais dados de pagamento ainda faltam anexar numa cobrança em aberto.
 function chargeFaltaDados(c) {
@@ -1631,6 +1488,13 @@ function openClientModal(id, onSaved) {
       </div>
 
       <div class="field">
+        <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer;">
+          <input type="checkbox" id="cUsaSistema" ${editing ? (clienteUsaSistema(editing) ? 'checked' : '') : ''}>
+          <span>🖥️ Cliente usa sistema (se não pagar, o sistema é bloqueado)</span>
+        </label>
+        <div class="view-desc" style="margin-top:4px;">Só quem usa sistema recebe o aviso de bloqueio na mensagem de cobrança.</div>
+      </div>
+      <div class="field">
         <label class="field-label">Plano contratado</label>
         <select class="input" id="cPlanoId">
           <option value="">— nenhum —</option>
@@ -1696,22 +1560,11 @@ function openClientModal(id, onSaved) {
       <div class="field" id="cFormaRecRow" style="${editing && editing.recorrente ? '' : 'display:none;'}">
         <label class="field-label">Como este cliente paga a mensalidade</label>
         <select class="input" id="cFormaRec">
-          <option value="pix" ${formaRecorrenciaDoCliente(editing) === 'pix' ? 'selected' : ''}>Pix (QR Code + copia e cola)</option>
+          <option value="pix" ${formaRecorrenciaDoCliente(editing) === 'pix' ? 'selected' : ''}>Pix (chave principal)</option>
           <option value="boleto" ${formaRecorrenciaDoCliente(editing) === 'boleto' ? 'selected' : ''}>Boleto (eu gero e anexo a cada mês)</option>
           <option value="cartao" ${formaRecorrenciaDoCliente(editing) === 'cartao' ? 'selected' : ''}>Cartão (link de pagamento a cada mês)</option>
         </select>
         <div class="view-desc" style="margin-top:4px;">Boleto e cartão: a mensalidade é lançada sozinha, mas fica marcada como "falta boleto/link" até você anexar. Aí a mensagem sai com os dados certos.</div>
-      </div>
-      <div id="cPixRow" style="${editing && editing.recorrente && formaRecorrenciaDoCliente(editing) === 'pix' ? '' : 'display:none;'}">
-        <div class="field">
-          <label class="field-label">🔑 Chave Pix deste cliente (opcional)</label>
-          <input class="input" id="cPixChave" placeholder="CPF, CNPJ, e-mail, celular ou chave aleatória" value="${editing ? escapeHtml(editing.pixChave || '') : ''}">
-          <div class="view-desc" style="margin-top:4px;">Se ficar vazio, usa a chave geral das Configurações. Celular: digite com +55 e DDD (ex: +5546999998888) pra não confundir com CPF.</div>
-        </div>
-        <div class="field">
-          <label class="field-label">Nome do titular da chave (opcional)</label>
-          <input class="input" id="cPixTitular" maxlength="25" placeholder="Aparece no app do banco ao pagar" value="${editing ? escapeHtml(editing.pixTitular || '') : ''}">
-        </div>
       </div>
 
       <div class="field">
@@ -1759,7 +1612,6 @@ function openClientModal(id, onSaved) {
     const rec = qs('#cRecorrente').checked;
     qs('#cRecorrenciaRow').style.display = rec ? '' : 'none';
     qs('#cFormaRecRow').style.display = rec ? '' : 'none';
-    qs('#cPixRow').style.display = rec && qs('#cFormaRec').value === 'pix' ? '' : 'none';
   };
   qs('#cRecorrente').onchange = atualizarRecVisivel;
   qs('#cTipoCobranca').onchange = () => {
@@ -1823,12 +1675,6 @@ function openClientModal(id, onSaved) {
       return;
     }
 
-    const pixChaveRaw = qs('#cPixChave').value.trim();
-    if (pixChaveRaw && !/^[\x21-\x7E]+$/.test(normalizarChavePix(pixChaveRaw))) {
-      alert('A chave Pix não pode ter espaços ou caracteres especiais. Confira e tente de novo.');
-      return;
-    }
-
     const indicadoPor = qs('#cIndicadoPor').value;
     if (editing && indicadoPor === editing.id) {
       alert('Um cliente não pode ser indicado por ele mesmo.');
@@ -1863,8 +1709,7 @@ function openClientModal(id, onSaved) {
       recorrente,
       diaVencimento: diaVencimentoValido(qs('#cDiaVenc').value),
       recorrenciaInicio: qs('#cRecInicio').value || todayISO().slice(0, 7),
-      pixChave: pixChaveRaw,
-      pixTitular: qs('#cPixTitular').value.trim(),
+      usaSistema: qs('#cUsaSistema').checked,
       formaPagamentoRecorrente: qs('#cFormaRec').value,
       cobrancaDividida: divididaCli,
       divisao: divididaCli ? { nome1: divNome1, nome2: divNome2, pct1: divPct1 } : null
@@ -1941,7 +1786,6 @@ function renderClienteDetalhe(clientId) {
         ${Number(client.descontoProximaPct) > 0 ? `<div class="view-desc" style="margin-top:4px;">🎁 ${Number(client.descontoProximaPct)}% de desconto já garantido na próxima mensalidade (pagamento antecipado)</div>` : ''}
         ${client.cobrancaDividida && client.divisao ? `<div class="view-desc" style="margin-top:4px;">👥 Cobrança dividida: ${escapeHtml(client.divisao.nome1)} (${client.divisao.pct1}%) e ${escapeHtml(client.divisao.nome2)} (${Math.round((100 - client.divisao.pct1) * 100) / 100}%)</div>` : ''}
         ${client.recorrente ? `<div class="view-desc" style="margin-top:4px;">🔁 Lançamento automático, vence dia ${diaVencimentoValido(client.diaVencimento)} · paga via ${{ pix: 'Pix', boleto: 'boleto', cartao: 'cartão' }[formaRecorrenciaDoCliente(client)]}</div>` : ''}
-        ${client.pixChave ? `<div class="view-desc" style="margin-top:4px;">🔑 Pix próprio: ${escapeHtml(client.pixChave)}</div>` : ''}
       </div>
       <div class="stat-card">
         <div class="stat-label">Indicado por</div>
@@ -2174,8 +2018,7 @@ function renderChargeLedger(charges, opts = {}) {
           <div class="ledger-value">${formatCurrency(c.valor)}</div>
           <div class="ledger-actions">
             ${status !== 'pago' && !c.isenta && (c.formasPagamento || []).some(f => f === 'boleto' || f === 'cartao') ? `<button class="btn btn-ghost btn-sm" data-dados-charge="${c.id}">${(c.formasPagamento || []).includes('boleto') && (c.formasPagamento || []).includes('cartao') ? '🧾 Boleto/cartão' : (c.formasPagamento || []).includes('boleto') ? '🧾 Boleto' : '💳 Link cartão'}</button>` : ''}
-            ${status !== 'pago' && !c.isenta && Number(c.valor) > 0 && chargeAceitaPix(c, client) && pixConfigParaCliente(client).chave ? `<button class="btn btn-ghost btn-sm" data-pix-charge="${c.id}">QR Pix</button>` : ''}
-            ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">Enviar</button>` : ''}
+            ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">${c.enviadaEm ? '✓ Enviada' : 'Enviar'}</button>` : ''}
             ${status !== 'pago' ? `<button class="btn btn-ghost btn-sm" data-pay-charge="${c.id}">Marcar pago</button>` : ''}
             ${podeIsentar ? `<button class="btn btn-ghost btn-sm" data-isentar-charge="${c.id}">🎁 Isentar</button>` : ''}
             ${status === 'pago' && !c.isenta ? `<button class="btn btn-ghost btn-sm" data-recibo-charge="${c.id}">🧾 Recibo</button>` : ''}
@@ -2196,7 +2039,6 @@ function bindChargeActions() {
       row.style.display = row.textContent.toLowerCase().includes(termo) ? '' : 'none';
     });
   });
-  qsa('[data-pix-charge]').forEach(b => b.onclick = () => openPixQrModal(b.dataset.pixCharge));
   qsa('[data-dados-charge]').forEach(b => b.onclick = () => openDadosPagamentoModal(b.dataset.dadosCharge));
   qsa('[data-send-charge]').forEach(b => b.onclick = () => openWhatsappModal(b.dataset.sendCharge));
   qsa('[data-pay-charge]').forEach(b => b.onclick = () => openMarkPaidModal(b.dataset.payCharge));
@@ -2502,7 +2344,7 @@ function openChargeModal(presets, onSaved) {
         <div class="payment-check-group">
           <label class="service-check" style="border-bottom:none; padding:8px 10px;">
             <input type="checkbox" id="chPagPix" ${getSettings().pix ? 'checked' : ''}>
-            <span>Pix ${getSettings().pix ? '' : '<span class="quick-calc-result" style="color:var(--ink-soft); display:inline;">(cadastre sua chave em Configurações ou no cadastro do cliente)</span>'}</span>
+            <span>Pix ${getSettings().pix ? '' : '<span class="quick-calc-result" style="color:var(--ink-soft); display:inline;">(cadastre sua chave Pix em Configurações)</span>'}</span>
           </label>
           <label class="service-check" style="border-bottom:none; padding:8px 10px;">
             <input type="checkbox" id="chPagCartao">
@@ -2564,7 +2406,6 @@ function openChargeModal(presets, onSaved) {
   function atualizarHintPlano() {
     atualizarRecorrenciaUI();
     const cliPix = qs('#chCliente') ? clientById(qs('#chCliente').value) : null;
-    if (cliPix && cliPix.pixChave && qs('#chPagPix')) qs('#chPagPix').checked = true;
     const hintEl = qs('#chPlanoHint');
     if (!hintEl) return;
     const clienteSelect = qs('#chCliente');
@@ -2979,31 +2820,31 @@ function linhaDivisaoCobranca(charge, client) {
   return `👥 *Cobrança dividida:*\n   • ${d.nome1}: *${formatCurrency(parte1)}*\n   • ${d.nome2}: *${formatCurrency(parte2)}*\n`;
 }
 
+// Cliente "usa sistema"? Se o cadastro já tem a marcação, vale ela; senão deduz pelo plano.
+function clienteUsaSistema(client) {
+  if (!client) return false;
+  if (typeof client.usaSistema === 'boolean') return client.usaSistema;
+  return /sistema|painel|e-?commerce/i.test(String(client.plano || ''));
+}
+
 const MODELO_COBRANCA_PADRAO =
 `Oi, {nome}! Tudo bem? 😊
-
-Aqui é a *NetBug | Assistente de IA do Dalton Neres*.
 
 Passando para lembrar da sua *{descricao}* 🧾
 
 💰 *Valor:* {valor}
-{divisao}📅 *Vencimento:* {vencimento_relativo} ({vencimento_data})
-{atraso}{pagamento}
+{divisao}📅 *Vencimento:* {vencimento_data}
+{pagamento}
 
 {aviso_bloqueio}
 
-Se o pagamento já foi realizado, pode desconsiderar esta mensagem.
-
-Qualquer dúvida, ficamos à disposição! 🙏
-
-{rodape_automatico}`;
+Se já pagou, pode desconsiderar esta mensagem. Qualquer dúvida, é só chamar! 🙏`;
 
 function renderTemplate(template, vars) {
   return String(template || '').replace(/\{(\w+)\}/g, (m, key) => (vars[key] != null ? vars[key] : ''));
 }
 
-// Cobrança de cliente recorrente (mensalidade): sempre manda chave + copia e cola + QR Code,
-// pra o cliente não errar na hora de pagar.
+// Cobrança de cliente recorrente (mensalidade)
 function clienteEhRecorrente(charge, client) {
   return !!(charge && (charge.recorrente || (client && client.recorrente)));
 }
@@ -3015,23 +2856,25 @@ function pixChaveRotulo(chave) {
 const MODELO_RECORRENTE_PADRAO =
 `Oi, {nome}! Tudo bem? 😊
 
-Aqui é a *NetBug | Assistente de IA do Dalton Neres*.
-
 Passando para lembrar da sua *mensalidade de {competencia}* ({plano}) 🧾
 
 💰 *Valor:* {valor}
-{divisao}📅 *Vencimento:* {vencimento_relativo} ({vencimento_data})
-{atraso}{pagamento}
-
-🎁 *Pague antes e ganhe desconto na próxima mensalidade:* 1 dia antes = 1%, 2 dias = 2%, 3 dias = 3%, 4 dias = 4% e 5 dias ou mais = 5%.
+{divisao}📅 *Vencimento:* {vencimento_data}
+{pagamento}
 
 {aviso_bloqueio}
 
-Se o pagamento já foi realizado, pode desconsiderar esta mensagem.
+Se já pagou, pode desconsiderar esta mensagem. Qualquer dúvida, é só chamar! 🙏`;
 
-Qualquer dúvida, ficamos à disposição! 🙏
-
-{rodape_automatico}`;
+// Modelos salvos antes desta versão (com a "montoeira" de avisos) são ignorados
+// em favor do novo padrão enxuto; ao salvar de novo, vale o que a pessoa escrever.
+const MODELO_VERSAO = 2;
+function modeloCobrancaAtual(s) {
+  return (s.modeloVersao === MODELO_VERSAO && s.modeloCobranca) ? s.modeloCobranca : MODELO_COBRANCA_PADRAO;
+}
+function modeloRecorrenteAtual(s) {
+  return (s.modeloVersao === MODELO_VERSAO && s.modeloCobrancaRecorrente) ? s.modeloCobrancaRecorrente : MODELO_RECORRENTE_PADRAO;
+}
 
 function buildLinhasPagamento(charge, settings) {
   // Compatibilidade: cobranças criadas antes dessa opção existir não têm
@@ -3044,15 +2887,8 @@ function buildLinhasPagamento(charge, settings) {
   let linhas = '';
   if (chargeAceitaPix(charge, client) && cfgPix.chaveExibida) {
     linhas += `\n💳 ${pixChaveRotulo(cfgPix.chaveExibida)}: *${cfgPix.chaveExibida}*`;
-    // Cliente com chave própria OU recorrente: manda também o Pix copia e cola, já com o valor.
-    const recorr = clienteEhRecorrente(charge, client);
-    if (cfgPix.chave && Number(charge.valor) > 0 && !charge.isenta) {
-      linhas += recorr
-        // Recorrente: QR Code junto + copia e cola numa 2ª mensagem (fácil de copiar).
-        ? `\n📷 Pode pagar pelo QR Code (imagem) ou pelo Pix copia e cola, que te mando logo em seguida.`
-        // Demais clientes: chave + QR Code.
-        : `\n📷 Pode pagar pela chave ou pelo QR Code (imagem) que vai junto.`;
-    }
+    linhas += `\n🏦 Banco: *${cfgPix.banco}*`;
+    linhas += `\n👤 Titular: *${cfgPix.titular}*`;
   }
 
   if (formas.includes('cartao')) {
@@ -3078,7 +2914,7 @@ function buildLinhasPagamento(charge, settings) {
 function montarVariaveisMensagemCobranca(charge, client, settings) {
   const quemFala = settings.seuNome ? `Aqui quem fala é *${settings.seuNome}*.` : '';
   const status = chargeStatus(charge);
-  const atraso = status === 'atrasado' ? '\n⚠️ Essa cobrança já está atrasada — quando conseguir, dá uma olhada aí!' : '';
+  const atraso = ''; // cobra uma vez só: sem texto de cobrança repetida/atraso
   const pagamento = buildLinhasPagamento(charge, settings);
   return {
     nome: client.nome,
@@ -3092,46 +2928,44 @@ function montarVariaveisMensagemCobranca(charge, client, settings) {
     competencia: charge.competencia ? competenciaLabel(charge.competencia) : String(charge.vencimento || '').slice(5, 7) + '/' + String(charge.vencimento || '').slice(0, 4),
     plano: (client && client.plano) || '',
     divisao: linhaDivisaoCobranca(charge, client),
-    aviso_bloqueio: AVISO_BLOQUEIO_TEXTO,
-    rodape_automatico: rodapeAutomaticoTexto()
+    // Bloqueio só vale pra quem usa sistema; pra os outros, a linha some.
+    aviso_bloqueio: clienteUsaSistema(client) ? AVISO_BLOQUEIO_TEXTO : '',
+    rodape_automatico: ''
   };
 }
 
 function buildMessage(charge, client) {
   const settings = getSettings();
   // Cliente de mensalidade recorrente tem texto próprio (Configurações → Mensagem de mensalidade)
-  const template = clienteEhRecorrente(charge, client)
-    ? (settings.modeloCobrancaRecorrente || MODELO_RECORRENTE_PADRAO)
-    : (settings.modeloCobranca || MODELO_COBRANCA_PADRAO);
-  // Modelos personalizados salvos antes dessa atualização não têm os novos campos:
-  // o aviso de bloqueio e o rodapé automático são acrescentados mesmo assim.
-  let modelo = template;
+  let modelo = clienteEhRecorrente(charge, client) ? modeloRecorrenteAtual(settings) : modeloCobrancaAtual(settings);
   if (!modelo.includes('{divisao}')) {
     modelo = /\{valor\}.*\n/.test(modelo)
       ? modelo.replace(/(\{valor\}.*\n)/, '$1{divisao}')
       : modelo + '\n\n{divisao}';
   }
   if (!modelo.includes('{aviso_bloqueio}')) modelo += '\n\n{aviso_bloqueio}';
-  if (!modelo.includes('{rodape_automatico}')) modelo += '\n\n{rodape_automatico}';
-  return renderTemplate(modelo, montarVariaveisMensagemCobranca(charge, client, settings));
+  // Linhas vazias (ex.: sem aviso de bloqueio) não deixam buraco na mensagem.
+  return renderTemplate(modelo, montarVariaveisMensagemCobranca(charge, client, settings))
+    .replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// Cobrança é enviada uma vez só: guarda quando foi enviada.
+function marcarCobrancaEnviada(chargeId) {
+  const lista = getCharges().slice();
+  const i = lista.findIndex(c => c.id === chargeId);
+  if (i < 0 || lista[i].enviadaEm) return;
+  lista[i] = { ...lista[i], enviadaEm: new Date().toISOString() };
+  saveCharges(lista);
 }
 
 function openWhatsappModal(chargeId) {
   const charge = getCharges().find(c => c.id === chargeId);
   const client = charge.clientId ? clientById(charge.clientId) : { nome: charge.avulsoNome, telefone: charge.avulsoTelefone };
   if (!client || !client.telefone) { alert('Essa cobrança não tem um WhatsApp válido pra enviar.'); return; }
+  if (charge.enviadaEm && !confirm(`Esta cobrança já foi enviada em ${dataHoraBR(charge.enviadaEm)}. A cobrança é feita uma vez só — enviar de novo mesmo assim?`)) return;
   const falta = chargeFaltaDados(charge);
   if (falta.length && !confirm(`Essa cobrança ainda está sem ${falta.map(k => FALTA_LABEL[k]).join(' e ')}. Enviar assim mesmo?\n\n(Cancelar = voltar e anexar primeiro, no botão da cobrança.)`)) return;
-  let opts = null;
-  if (!charge.isenta && Number(charge.valor) > 0 && chargeAceitaPix(charge, client)) {
-    const payload = pixPayloadDaCobranca(charge);
-    const canvas = payload ? pixQrCanvas(payload) : null;
-    if (canvas) {
-      const nomeArq = `pix-${String(client.nome).replace(/\s+/g, '-').toLowerCase()}-${charge.vencimento}.png`;
-      opts = { qrCanvas: canvas, nomeArq, payload: clienteEhRecorrente(charge, client) ? payload : null };
-    }
-  }
-  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client), null, opts);
+  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client), () => marcarCobrancaEnviada(chargeId));
 }
 
 function buildMeetingMessage(meeting, client) {
@@ -3165,15 +2999,9 @@ function openMeetingWhatsappModal(meetingId) {
   openSendWhatsappModal(`Enviar lembrete — ${client.nome}`, client, buildMeetingMessage(meeting, client));
 }
 
-function openSendWhatsappModal(title, client, defaultMsg, onSent, opts) {
-  const qr = opts && opts.qrCanvas ? opts : null;
+function openSendWhatsappModal(title, client, defaultMsg, onSent) {
   openModal(`
     <div class="modal-title">${escapeHtml(title)}</div>
-    ${qr ? `
-    <div class="pix-qr-box" style="margin-bottom:12px;">
-      <img class="pix-qr-img" style="width:150px;" alt="QR Code Pix" src="${qr.qrCanvas.toDataURL('image/png')}">
-      <div class="view-desc" style="margin:0; text-align:center;">📷 QR Code Pix que vai junto com a mensagem</div>
-    </div>` : ''}
     <div class="field">
       <label class="field-label">Mensagem (pode editar antes de enviar)</label>
       <textarea class="input" id="waMsg" style="min-height:170px;">${escapeHtml(defaultMsg)}</textarea>
@@ -3182,70 +3010,16 @@ function openSendWhatsappModal(title, client, defaultMsg, onSent, opts) {
       <label class="field-label">Número do WhatsApp</label>
       <input class="input" id="waPhone" value="${escapeHtml(client.telefone)}">
     </div>
-    ${qr ? `<div class="view-desc" id="waHint" style="margin:0 0 10px;">${qr.payload ? 'Ordem: 1) mensagem + QR Code · 2) só o copia e cola, em mensagem separada.' : 'Envie a mensagem e cole o QR Code na conversa.'}</div>` : ''}
     <div class="modal-actions" style="flex-wrap:wrap;">
-      <button type="button" class="btn btn-ghost" id="btnCancelWa">${qr ? 'Fechar' : 'Não enviar agora'}</button>
-      ${qr ? `<button type="button" class="btn btn-ghost" id="btnBaixarQrWa">⬇️ Baixar QR</button>
-      ${qr.payload ? `<button type="button" class="btn btn-whatsapp" id="btnCodigoWa">📋 2ª mensagem: só o copia e cola</button>` : ''}
-      <button type="button" class="btn btn-whatsapp hidden" id="btnShareWa">📤 Compartilhar texto + QR</button>` : ''}
-      <button type="button" class="btn btn-whatsapp" id="btnOpenWa">${qr ? 'Abrir conversa e copiar QR' : 'Enviar no WhatsApp'}</button>
+      <button type="button" class="btn btn-ghost" id="btnCancelWa">Não enviar agora</button>
+      <button type="button" class="btn btn-whatsapp" id="btnOpenWa">Enviar no WhatsApp</button>
     </div>
   `);
   qs('#btnCancelWa').onclick = closeModal;
-
-  let qrBlob = null;
-  const hint = (t) => { const h = qs('#waHint'); if (h) h.textContent = t; };
-  if (qr) {
-    qs('#btnBaixarQrWa').onclick = () => {
-      const a = document.createElement('a');
-      a.href = qr.qrCanvas.toDataURL('image/png');
-      a.download = qr.nomeArq;
-      a.click();
-    };
-    qr.qrCanvas.toBlob(blob => {
-      if (!blob) return;
-      qrBlob = blob;
-      const file = new File([blob], qr.nomeArq, { type: 'image/png' });
-      // Celular: o menu "Compartilhar" manda imagem + texto de uma vez pro WhatsApp.
-      if (navigator.canShare && navigator.canShare({ files: [file] }) && qs('#btnShareWa')) {
-        const b = qs('#btnShareWa');
-        b.classList.remove('hidden');
-        b.onclick = () => {
-          navigator.share({ files: [file], text: qs('#waMsg').value })
-            .then(() => { closeModal(); if (onSent) onSent(); })
-            .catch(() => {});
-        };
-      }
-    });
-  }
-
-  if (qr && qr.payload) {
-    // Manda o código sozinho numa mensagem: o cliente segura e copia sem pegar texto extra.
-    qs('#btnCodigoWa').onclick = () => {
-      const phone = onlyDigits(qs('#waPhone').value);
-      if (phone.length < 10) { alert('Número de WhatsApp inválido.'); return; }
-      window.open(`https://wa.me/${phone}?text=${encodeURIComponent(qr.payload)}`, '_blank');
-    };
-  }
-
   qs('#btnOpenWa').onclick = () => {
     const phone = onlyDigits(qs('#waPhone').value);
     const msg = qs('#waMsg').value;
     if (phone.length < 10) { alert('Número de WhatsApp inválido.'); return; }
-    if (qr) {
-      // Copia o QR pra área de transferência e abre a conversa com o texto;
-      // é só colar a imagem na conversa (Ctrl+V / segurar e colar).
-      let copiou = Promise.reject();
-      if (qrBlob && navigator.clipboard && window.ClipboardItem) {
-        try { copiou = navigator.clipboard.write([new ClipboardItem({ 'image/png': qrBlob })]); } catch (e) {}
-      }
-      window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
-      copiou
-        .then(() => hint('✅ Conversa aberta e QR Code copiado. Cole a imagem na conversa (Ctrl+V, ou segure e toque em "Colar") e envie.'))
-        .catch(() => hint('Conversa aberta. Toque em "Baixar QR" e anexe a imagem na conversa.'));
-      if (onSent) onSent();
-      return;
-    }
     window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
     closeModal();
     if (onSent) onSent();
@@ -5483,12 +5257,16 @@ function renderConfig() {
         <input class="input" id="sEmpresa" value="${escapeHtml(s.empresaNome || '')}">
       </div>
       <div class="field">
-        <label class="field-label">Chave PIX (opcional, aparece na mensagem)</label>
+        <label class="field-label">Chave Pix principal (a única usada nas cobranças)</label>
         <input class="input" id="sPix" value="${escapeHtml(s.pix || '')}">
       </div>
       <div class="field">
-        <label class="field-label">Cidade (usada no QR Code Pix, opcional)</label>
-        <input class="input" id="sPixCidade" maxlength="15" placeholder="Ex: Dois Vizinhos" value="${escapeHtml(s.pixCidade || '')}">
+        <label class="field-label">Banco da chave Pix</label>
+        <input class="input" id="sPixBanco" value="${escapeHtml(s.pixBanco || PIX_BANCO_PADRAO)}">
+      </div>
+      <div class="field">
+        <label class="field-label">Titular da conta</label>
+        <input class="input" id="sPixTitular" value="${escapeHtml(s.pixTitular || PIX_TITULAR_PADRAO)}">
       </div>
       <div class="field">
         <label class="field-label">Desconto por indicação (R$, opcional)</label>
@@ -5504,11 +5282,11 @@ function renderConfig() {
       são preenchidas automaticamente:
     </p>
     <p class="view-desc" style="margin-bottom:14px; font-family:var(--font-mono); font-size:12px;">
-      {nome} {quem_fala} {descricao} {valor} {divisao} {vencimento_data} {vencimento_relativo} {atraso} {pagamento} {aviso_bloqueio} {rodape_automatico}
+      {nome} {quem_fala} {descricao} {valor} {divisao} {vencimento_data} {vencimento_relativo} {pagamento} {aviso_bloqueio}
     </p>
     <form id="modeloCobrancaForm" style="max-width:520px; margin-bottom:12px;">
       <div class="field">
-        <textarea class="input" id="sModeloCobranca" style="min-height:190px; font-size:13px;">${escapeHtml(s.modeloCobranca || MODELO_COBRANCA_PADRAO)}</textarea>
+        <textarea class="input" id="sModeloCobranca" style="min-height:190px; font-size:13px;">${escapeHtml(modeloCobrancaAtual(s))}</textarea>
       </div>
       <div style="display:flex; gap:10px; margin-bottom:16px;">
         <button type="submit" class="btn btn-primary">Salvar modelo</button>
@@ -5524,11 +5302,11 @@ function renderConfig() {
       conforme o cliente paga (Pix, boleto ou cartão). Variáveis extras:
     </p>
     <p class="view-desc" style="margin-bottom:14px; font-family:var(--font-mono); font-size:12px;">
-      {nome} {quem_fala} {plano} {competencia} {valor} {divisao} {vencimento_data} {vencimento_relativo} {atraso} {pagamento} {aviso_bloqueio} {rodape_automatico}
+      {nome} {quem_fala} {plano} {competencia} {valor} {divisao} {vencimento_data} {vencimento_relativo} {pagamento} {aviso_bloqueio}
     </p>
     <form id="modeloRecorrenteForm" style="max-width:520px; margin-bottom:12px;">
       <div class="field">
-        <textarea class="input" id="sModeloRecorrente" style="min-height:190px; font-size:13px;">${escapeHtml(s.modeloCobrancaRecorrente || MODELO_RECORRENTE_PADRAO)}</textarea>
+        <textarea class="input" id="sModeloRecorrente" style="min-height:190px; font-size:13px;">${escapeHtml(modeloRecorrenteAtual(s))}</textarea>
       </div>
       <div style="display:flex; gap:10px; margin-bottom:16px;">
         <button type="submit" class="btn btn-primary">Salvar modelo</button>
@@ -5667,7 +5445,8 @@ function renderConfig() {
       seuNome: qs('#sSeuNome').value.trim(),
       empresaNome: qs('#sEmpresa').value.trim(),
       pix: qs('#sPix').value.trim(),
-      pixCidade: qs('#sPixCidade').value.trim(),
+      pixBanco: qs('#sPixBanco').value.trim(),
+      pixTitular: qs('#sPixTitular').value.trim(),
       valorDescontoIndicacao: qs('#sDescontoIndicacao').value === '' ? null : Number(qs('#sDescontoIndicacao').value)
     });
     refreshBrandBar();
@@ -5699,7 +5478,7 @@ function renderConfig() {
 
   qs('#modeloCobrancaForm').onsubmit = (e) => {
     e.preventDefault();
-    saveSettings({ ...getSettings(), modeloCobranca: qs('#sModeloCobranca').value });
+    saveSettings({ ...getSettings(), modeloCobranca: qs('#sModeloCobranca').value, modeloVersao: MODELO_VERSAO });
     alert('Modelo salvo.');
   };
 
@@ -5717,7 +5496,7 @@ function renderConfig() {
       boletoCodigo: forma === 'boleto' && !sem ? '00000.00000 00000.000000 00000.000000 0 00000000000000' : null,
       linkPagamentoCartao: forma === 'cartao' && !sem ? 'https://exemplo.com/pagar' : null
     };
-    const clienteExemplo = { nome: 'Maria', plano: 'Suporte Básico', recorrente: true, pixChave: forma === 'pix' ? (settings.pix || 'maria@exemplo.com') : '' };
+    const clienteExemplo = { nome: 'Maria', plano: 'Suporte Básico', recorrente: true, usaSistema: true };
     const vars = montarVariaveisMensagemCobranca(chargeExemplo, clienteExemplo, settings);
     qs('#previewModeloRecorrente').textContent = renderTemplate(qs('#sModeloRecorrente').value, vars);
   }
@@ -5730,7 +5509,7 @@ function renderConfig() {
   };
   qs('#modeloRecorrenteForm').onsubmit = (e) => {
     e.preventDefault();
-    saveSettings({ ...getSettings(), modeloCobrancaRecorrente: qs('#sModeloRecorrente').value });
+    saveSettings({ ...getSettings(), modeloCobrancaRecorrente: qs('#sModeloRecorrente').value, modeloVersao: MODELO_VERSAO });
     alert('Modelo de mensalidade salvo.');
   };
 
