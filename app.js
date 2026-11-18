@@ -779,10 +779,27 @@ function closeModal() { qs('#modalRoot').innerHTML = ''; }
 
 // ---------- NAVEGAÇÃO ----------
 let currentView = 'dashboard';
+let _dashboardValuesHidden = localStorage.getItem('ca_hide_dashboard_values') === 'true';
+
+function applyDashboardValuesVisibility(hidden) {
+  const main = qs('#main');
+  if (!main) return;
+  main.classList.toggle('dashboard-values-hidden', hidden);
+  qsa('.dashboard-money-value', main).forEach(el => {
+    if (hidden) {
+      if (!el.hasAttribute('data-visible-value')) el.setAttribute('data-visible-value', el.textContent);
+      el.textContent = '••••••';
+    } else if (el.hasAttribute('data-visible-value')) {
+      el.textContent = el.getAttribute('data-visible-value');
+      el.removeAttribute('data-visible-value');
+    }
+  });
+}
 
 function navigate(view) {
   currentDetailClientId = null;
   currentView = view;
+  applyDashboardValuesVisibility(view === 'dashboard' && _dashboardValuesHidden);
   qsa('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === (view === 'mensalidades' ? 'servicos' : view)));
   const renderers = {
     dashboard: renderDashboard,
@@ -803,8 +820,7 @@ function navigate(view) {
 }
 
 function refreshBrandBar() {
-  const s = getSettings();
-  qs('#brandEmpresa').textContent = s.empresaNome ? s.empresaNome : 'seu financeiro';
+  qs('#brandEmpresa').textContent = 'Dalton Neres | Developer';
 }
 
 // Nome usado na saudação da tela inicial — é pessoal (fica salvo no login de
@@ -1154,6 +1170,7 @@ function renderDashboard() {
         <div class="view-desc">${formatDateLongPT()}</div>
       </div>
       <div class="tab-actions">
+        <button class="btn btn-ghost btn-sm dashboard-privacy-toggle" id="toggleDashboardValues" type="button" aria-label="${_dashboardValuesHidden ? 'Mostrar valores financeiros' : 'Ocultar valores financeiros'}" aria-pressed="${_dashboardValuesHidden}" title="${_dashboardValuesHidden ? 'Mostrar valores financeiros' : 'Ocultar valores financeiros'}">${_dashboardValuesHidden ? '🙈' : '👁️'}</button>
         <button class="btn btn-primary btn-sm" id="qaCobranca">+ Cobrança</button>
         <button class="btn btn-ghost btn-sm" id="qaCliente">+ Cliente</button>
         <button class="btn btn-ghost btn-sm" id="qaReuniao">+ Reunião</button>
@@ -1196,22 +1213,22 @@ function renderDashboard() {
     <div class="cards-grid">
       <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">A receber</div>
-        <div class="stat-value">${formatCurrency(aReceber)}</div>
+        <div class="stat-value dashboard-money-value">${formatCurrency(aReceber)}</div>
         <div class="stat-sub">${abertasMes.length} cobrança${abertasMes.length === 1 ? '' : 's'} em aberto · ${mesAnoLabel(mesAtual)}</div>
       </div>
       <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">Recebido no mês</div>
-        <div class="stat-value emerald">${formatCurrency(recebidoMes)}</div>
+        <div class="stat-value emerald dashboard-money-value">${formatCurrency(recebidoMes)}</div>
         <div class="stat-sub">${mesAnoLabel(mesAtual)}</div>
       </div>
       <div class="stat-card stat-link" data-go="cobrancas">
         <div class="stat-label">Atrasado</div>
-        <div class="stat-value brick">${formatCurrency(atrasado)}</div>
+        <div class="stat-value brick dashboard-money-value">${formatCurrency(atrasado)}</div>
         <div class="stat-sub">${nAtrasadas === 0 ? 'nada atrasado 👏' : nAtrasadas + ' cobrança' + (nAtrasadas === 1 ? '' : 's')}</div>
       </div>
       <div class="stat-card stat-link" data-go="clientes">
         <div class="stat-label">Recorrente / mês</div>
-        <div class="stat-value">${formatCurrency(recorrenteMes)}</div>
+        <div class="stat-value dashboard-money-value">${formatCurrency(recorrenteMes)}</div>
         <div class="stat-sub">${nRecorrentes} de ${clients.length} cliente${clients.length === 1 ? '' : 's'}</div>
       </div>
     </div>
@@ -1253,13 +1270,14 @@ function renderDashboard() {
         ${comissoesPendentes > 0 ? `
         <div class="stat-card stat-link" data-go="negociacoes">
           <div class="stat-label">Comissões a pagar (parcerias)</div>
-          <div class="stat-value brick">${formatCurrency(comissoesPendentes)}</div>
+          <div class="stat-value brick dashboard-money-value">${formatCurrency(comissoesPendentes)}</div>
           <div class="stat-sub">contratação + mensalidades do mês</div>
         </div>` : ''}
       </div>
     ` : ''}
   `;
 
+  applyDashboardValuesVisibility(_dashboardValuesHidden);
   bindChargeActions();
   qsa('[data-view-client]').forEach(a => a.onclick = (e) => { e.preventDefault(); renderClienteDetalhe(a.dataset.viewClient); });
   qsa('[data-go-orc]').forEach(el => el.onclick = () => { _servicosTab = 'orcamentos'; navigate('servicos'); });
@@ -1268,6 +1286,17 @@ function renderDashboard() {
   qs('#qaCliente').onclick = () => openClientModal();
   qs('#qaReuniao').onclick = () => openMeetingModal(null, null, () => renderDashboard());
   qs('#qaOrcamento').onclick = () => { _servicosTab = 'orcamentos'; navigate('servicos'); };
+  qs('#toggleDashboardValues').onclick = () => {
+    _dashboardValuesHidden = !_dashboardValuesHidden;
+    localStorage.setItem('ca_hide_dashboard_values', String(_dashboardValuesHidden));
+    applyDashboardValuesVisibility(_dashboardValuesHidden);
+    const button = qs('#toggleDashboardValues');
+    const label = _dashboardValuesHidden ? 'Mostrar valores financeiros' : 'Ocultar valores financeiros';
+    button.textContent = _dashboardValuesHidden ? '🙈' : '👁️';
+    button.setAttribute('aria-label', label);
+    button.setAttribute('title', label);
+    button.setAttribute('aria-pressed', String(_dashboardValuesHidden));
+  };
 }
 
 // ---------- CLIENTES ----------
@@ -2015,7 +2044,7 @@ function renderChargeLedger(charges, opts = {}) {
             <div class="ledger-sub">${escapeHtml(c.descricao)} · vence ${formatDateBR(c.vencimento)}${status === 'pago' && c.formaPagamentoUsada ? ' · pago via ' + formaPagamentoLabel(c.formaPagamentoUsada) : ''}</div>
           </div>
           <span class="stamp-badge ${stampClass}">${stampLabel}</span>
-          <div class="ledger-value">${formatCurrency(c.valor)}</div>
+          <div class="ledger-value ${opts.compact ? 'dashboard-money-value' : ''}">${formatCurrency(c.valor)}</div>
           <div class="ledger-actions">
             ${status !== 'pago' && !c.isenta && (c.formasPagamento || []).some(f => f === 'boleto' || f === 'cartao') ? `<button class="btn btn-ghost btn-sm" data-dados-charge="${c.id}">${(c.formasPagamento || []).includes('boleto') && (c.formasPagamento || []).includes('cartao') ? '🧾 Boleto/cartão' : (c.formasPagamento || []).includes('boleto') ? '🧾 Boleto' : '💳 Link cartão'}</button>` : ''}
             ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">${c.enviadaEm ? '✓ Enviada' : 'Enviar'}</button>` : ''}
@@ -5111,7 +5140,25 @@ async function gerarContratoDocx(registro) {
       nullGetter: () => MARCADOR_PENDENTE
     });
     doc.render(dados);
-    const out = doc.getZip().generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    const pacote = doc.getZip();
+    const logoResp = await fetch('images/dalton-neres-colorida.png');
+    if (!logoResp.ok) throw new Error('Não consegui carregar a logo para inserir no contrato.');
+    pacote.file('word/media/dalton-neres-logo.png', new Uint8Array(await logoResp.arrayBuffer()));
+    const largura = 1371600; // 1,5 pol em EMU
+    const altura = 265190; // mantém a proporção da logomarca horizontal
+    const paragrafoLogo = `<w:p><w:pPr><w:jc w:val="right"/><w:spacing w:after="120"/></w:pPr><w:r><w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${largura}" cy="${altura}"/><wp:docPr id="1" name="Dalton Neres Developer"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Dalton Neres Developer"/><pic:cNvPicPr><a:picLocks noChangeAspect="1"/></pic:cNvPicPr></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId8"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${largura}" cy="${altura}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    let documentXml = pacote.file('word/document.xml').asText();
+    documentXml = documentXml.replace('<w:body>', '<w:body>' + paragrafoLogo);
+    pacote.file('word/document.xml', documentXml);
+    let relsXml = pacote.file('word/_rels/document.xml.rels').asText();
+    relsXml = relsXml.replace('</Relationships>', '<Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/dalton-neres-logo.png"/></Relationships>');
+    pacote.file('word/_rels/document.xml.rels', relsXml);
+    let contentTypesXml = pacote.file('[Content_Types].xml').asText();
+    if (!contentTypesXml.includes('Extension="png"')) {
+      contentTypesXml = contentTypesXml.replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>');
+      pacote.file('[Content_Types].xml', contentTypesXml);
+    }
+    const out = pacote.generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
     const url = URL.createObjectURL(out);
     const a = document.createElement('a');
     a.href = url;
@@ -5143,6 +5190,7 @@ async function gerarContratoPDF(registro) {
     container.style.cssText = 'width:720px; padding:20px; font-family:Georgia,serif; font-size:12.5px; line-height:1.5; background:#fff; color:#111;';
     wrapper.appendChild(container);
     document.body.appendChild(wrapper);
+    await Promise.all(Array.from(container.querySelectorAll('img')).map(img => img.decode ? img.decode() : new Promise(resolve => { if (img.complete) resolve(); else { img.onload = resolve; img.onerror = resolve; } })));
     await new Promise(r => setTimeout(r, 50)); // dá tempo do navegador desenhar o conteúdo antes de capturar
     await html2pdf().from(container).set({
       margin: 15,
@@ -5586,7 +5634,7 @@ function renderConfig() {
 function emptyState(title, sub) {
   return `
     <div class="empty-state">
-      <div class="stamp-mark" style="margin-left:auto; margin-right:auto;">CA</div>
+      <img class="empty-brand-logo" src="images/dalton-neres-colorida.png" alt="Dalton Neres Developer">
       <div style="font-weight:600; font-size:15px; color:var(--ink); margin-bottom:4px;">${escapeHtml(title)}</div>
       <div style="font-size:13px;">${escapeHtml(sub)}</div>
     </div>
