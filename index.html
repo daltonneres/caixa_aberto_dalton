@@ -56,6 +56,7 @@
         <nav class="nav">
           <button class="nav-btn active" data-view="dashboard">Painel</button>
           <button class="nav-btn" data-view="clientes">Clientes</button>
+          <button class="nav-btn" data-view="tickets">Tickets</button>
           <button class="nav-btn" data-view="calculadora">Calculadora</button>
           <button class="nav-btn" data-view="cobrancas">Cobranças</button>
           <button class="nav-btn" data-view="saidas">Saídas</button>
@@ -84,6 +85,9 @@
 
   <!-- html2pdf.js (exportar o contrato preenchido também em PDF) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+
+  <!-- QR Code (gera o QR do Pix dentro do PDF da cobrança) -->
+  <script src="js/qrcode.js"></script>
 
   <!-- Firebase (compat SDK — mais simples de usar sem processo de build) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>

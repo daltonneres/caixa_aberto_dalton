@@ -244,6 +244,7 @@ let _contratos = [];
 let _mensalidades = [];
 let _colaboradores = [];
 let _negociacoes = [];
+let _tickets = [];
 let _saidas = [];
 let _settings = {};
 let _docRef = null;
@@ -261,6 +262,7 @@ function getContratos() { return _contratos; }
 function getMensalidades() { return _mensalidades; }
 function getColaboradores() { return _colaboradores; }
 function getNegociacoes() { return _negociacoes; }
+function getTickets() { return _tickets; }
 function getSaidas() { return _saidas; }
 function getSettings() { return _settings; }
 
@@ -273,6 +275,7 @@ function saveContratos(list) { _contratos = list; queuePersist(); }
 function saveMensalidades(list) { _mensalidades = list; queuePersist(); }
 function saveColaboradores(list) { _colaboradores = list; queuePersist(); }
 function saveNegociacoes(list) { _negociacoes = list; queuePersist(); }
+function saveTickets(list) { _tickets = list; queuePersist(); }
 function saveSaidas(list) { _saidas = list; queuePersist(); }
 function saveSettings(s) { _settings = s; queuePersist(); }
 
@@ -286,7 +289,7 @@ function chargeStatus(charge) {
 }
 
 
-// ---------- PIX: só a chave, o banco e o titular (sem QR Code) ----------
+// ---------- PIX: chave, banco e titular (o QR Code é gerado no PDF da cobrança) ----------
 const PIX_BANCO_PADRAO = 'Banco Inter';
 const PIX_TITULAR_PADRAO = 'Dalton José Neres';
 function pixConfigParaCliente() {
@@ -301,6 +304,326 @@ function pixConfigParaCliente() {
 function chargeAceitaPix(charge) {
   const f = charge.formasPagamento;
   return !f || f.includes('pix');
+}
+
+// ======================================================================
+// NETBUG + PDF DE COBRANÇA + RECIBO NOVO (QR Code Pix, logo, rodapé Netbug)
+// ======================================================================
+const NETBUG_ASSINATURA = 'Netbug, agente virtual de IA de Dalton Neres | Developer';
+
+// ---------- PIX "copia e cola" (BR Code / EMV) ----------
+function pixSemAcento(s, max) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().toUpperCase().slice(0, max);
+}
+// Telefone precisa do +55; e-mail, CPF/CNPJ e chave aleatória vão como estão.
+function pixNormalizarChave(chave) {
+  const c = String(chave || '').trim();
+  if (!c) return '';
+  if (c.includes('@')) return c.toLowerCase();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(c)) return c.toLowerCase();
+  const digitos = c.replace(/\D/g, '');
+  if (c.startsWith('+')) return '+' + digitos;
+  if (/[()]/.test(c)) return '+' + (digitos.startsWith('55') && digitos.length >= 12 ? digitos : '55' + digitos);
+  return digitos || c;
+}
+function pixCampo(id, valor) { return id + String(valor.length).padStart(2, '0') + valor; }
+function pixCrc16(str) {
+  let crc = 0xFFFF;
+  for (let i = 0; i < str.length; i++) {
+    crc ^= str.charCodeAt(i) << 8;
+    for (let b = 0; b < 8; b++) crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xFFFF : (crc << 1) & 0xFFFF;
+  }
+  return crc.toString(16).toUpperCase().padStart(4, '0');
+}
+function pixPayload({ chave, valor, nome, cidade }) {
+  const conta = pixCampo('00', 'br.gov.bcb.pix') + pixCampo('01', chave);
+  let p = pixCampo('00', '01') + pixCampo('26', conta) + pixCampo('52', '0000') + pixCampo('53', '986');
+  if (valor > 0) p += pixCampo('54', Number(valor).toFixed(2));
+  p += pixCampo('58', 'BR') + pixCampo('59', pixSemAcento(nome, 25) || 'RECEBEDOR')
+    + pixCampo('60', pixSemAcento(cidade, 15) || 'BRASIL') + pixCampo('62', pixCampo('05', '***')) + '6304';
+  return p + pixCrc16(p);
+}
+
+// ---------- valor por extenso (pra recibo) ----------
+function valorPorExtenso(valor) {
+  const unid = ['zero','um','dois','três','quatro','cinco','seis','sete','oito','nove','dez','onze','doze','treze','catorze','quinze','dezesseis','dezessete','dezoito','dezenove'];
+  const dez = ['','','vinte','trinta','quarenta','cinquenta','sessenta','setenta','oitenta','noventa'];
+  const cen = ['','cento','duzentos','trezentos','quatrocentos','quinhentos','seiscentos','setecentos','oitocentos','novecentos'];
+  const ate999 = (n) => {
+    if (n === 100) return 'cem';
+    const c = Math.floor(n / 100), r = n % 100, p = [];
+    if (c) p.push(cen[c]);
+    if (r) p.push(r < 20 ? unid[r] : dez[Math.floor(r / 10)] + (r % 10 ? ' e ' + unid[r % 10] : ''));
+    return p.join(' e ');
+  };
+  const inteiro = (n) => {
+    if (n === 0) return 'zero';
+    const mi = Math.floor(n / 1e6), mil = Math.floor((n % 1e6) / 1000), resto = n % 1000, partes = [];
+    if (mi) partes.push(ate999(mi) + (mi === 1 ? ' milhão' : ' milhões'));
+    if (mil) partes.push(mil === 1 ? 'mil' : ate999(mil) + ' mil');
+    if (resto) partes.push(ate999(resto));
+    if (partes.length === 1) return partes[0];
+    const ultimaComE = resto ? (resto < 100 || resto % 100 === 0) : true;
+    const ult = partes.pop();
+    return partes.join(', ') + (ultimaComE ? ' e ' : ', ') + ult;
+  };
+  const total = Math.round((Number(valor) || 0) * 100);
+  const reais = Math.floor(total / 100), cent = total % 100, out = [];
+  if (reais) out.push(inteiro(reais) + (reais === 1 ? ' real' : (reais % 1e6 === 0 ? ' de reais' : ' reais')));
+  if (cent) out.push(inteiro(cent) + (cent === 1 ? ' centavo' : ' centavos'));
+  return out.length ? out.join(' e ') : 'zero reais';
+}
+
+// ---------- utilitários de desenho ----------
+function pdfSeguro(s) { // Helvetica padrão não desenha emoji nem símbolos fora do WinAnsi
+  return String(s == null ? '' : s).replace(/[^\x0A\x20-\x7E\u00A0-\u00FF\u2013\u2014\u2018\u2019\u201C\u201D\u2022\u20AC]/g, '');
+}
+function pdfQuebrar(texto, font, size, largura) {
+  const linhas = [];
+  pdfSeguro(texto).split('\n').forEach(par => {
+    let atual = '';
+    par.split(/\s+/).filter(Boolean).forEach(palavra => {
+      // palavra maior que a linha (ex.: código Pix): quebra por caractere
+      while (font.widthOfTextAtSize(palavra, size) > largura) {
+        let i = palavra.length;
+        while (i > 1 && font.widthOfTextAtSize(palavra.slice(0, i), size) > largura) i--;
+        if (atual) { linhas.push(atual); atual = ''; }
+        linhas.push(palavra.slice(0, i));
+        palavra = palavra.slice(i);
+      }
+      const teste = atual ? atual + ' ' + palavra : palavra;
+      if (font.widthOfTextAtSize(teste, size) <= largura) atual = teste;
+      else { linhas.push(atual); atual = palavra; }
+    });
+    linhas.push(atual);
+  });
+  return linhas;
+}
+function baixarArquivo(blob, nome) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = nome;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+function nomeArquivoSeguro(s) {
+  return String(s || 'cliente').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'cliente';
+}
+
+// Base visual comum (cobrança e recibo): logo no topo, faixa azul, rodapé do Netbug.
+async function pdfCriarBase(tituloDoc, rotuloDireita) {
+  if (typeof PDFLib === 'undefined') throw new Error('A biblioteca pdf-lib não carregou. Confira sua internet.');
+  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const doc = await PDFDocument.create();
+  doc.setTitle(tituloDoc);
+  doc.setAuthor('Dalton Neres | Developer');
+  const W = 595.28, H = 841.89, M = 48;
+  const page = doc.addPage([W, H]);
+  const f = {
+    reg: await doc.embedFont(StandardFonts.Helvetica),
+    bold: await doc.embedFont(StandardFonts.HelveticaBold),
+    mono: await doc.embedFont(StandardFonts.Courier)
+  };
+  const cor = {
+    azul: rgb(5 / 255, 89 / 255, 245 / 255), tinta: rgb(0.09, 0.10, 0.13), suave: rgb(0.38, 0.42, 0.48),
+    fundo: rgb(0.955, 0.965, 0.98), linha: rgb(0.85, 0.87, 0.91), alerta: rgb(0.99, 0.95, 0.85), alertaBorda: rgb(0.86, 0.63, 0.14)
+  };
+  const logoResp = await fetch('images/dalton-neres-colorida.png');
+  if (!logoResp.ok) throw new Error('Não consegui carregar a logo (images/dalton-neres-colorida.png).');
+  const logo = await doc.embedPng(await logoResp.arrayBuffer());
+  const lw = 190, lh = lw * logo.height / logo.width;
+  const topoY = H - M - lh;
+  page.drawRectangle({ x: 0, y: H - 10, width: W, height: 10, color: cor.azul });
+  page.drawImage(logo, { x: M, y: topoY - 8, width: lw, height: lh });
+  const rot = pdfSeguro(rotuloDireita);
+  page.drawText(rot, { x: W - M - f.bold.widthOfTextAtSize(rot, 11), y: topoY + lh - 14, size: 11, font: f.bold, color: cor.azul });
+  const em = pdfSeguro(emitidaEmLabel());
+  page.drawText(em, { x: W - M - f.reg.widthOfTextAtSize(em, 8.5), y: topoY + lh - 28, size: 8.5, font: f.reg, color: cor.suave });
+  page.drawLine({ start: { x: M, y: topoY - 20 }, end: { x: W - M, y: topoY - 20 }, thickness: 0.8, color: cor.linha });
+
+  function rodape(textoExtra) {
+    page.drawLine({ start: { x: M, y: 70 }, end: { x: W - M, y: 70 }, thickness: 0.6, color: cor.linha });
+    const t1 = pdfSeguro('Documento gerado automaticamente pelo ' + NETBUG_ASSINATURA + '.');
+    page.drawText(t1, { x: M, y: 54, size: 8.5, font: f.reg, color: cor.suave });
+    if (textoExtra) page.drawText(pdfSeguro(textoExtra), { x: M, y: 42, size: 8.5, font: f.reg, color: cor.suave });
+  }
+  const texto = (t, x, y, size, font, color) => page.drawText(pdfSeguro(t), { x, y, size, font, color });
+  return { doc, page, f, cor, W, H, M, yInicio: topoY - 20, rodape, texto, rgb };
+}
+
+// ======================================================================
+// PDF DA COBRANÇA — devolve { blob, filename }
+// ======================================================================
+async function gerarCobrancaPDF(chargeId) {
+  const charge = getCharges().find(c => c.id === chargeId);
+  if (!charge) throw new Error('Cobrança não encontrada.');
+  const client = charge.clientId ? clientById(charge.clientId) : null;
+  const nomeCliente = client ? client.nome : (charge.avulsoNome || 'Cliente');
+  const settings = getSettings();
+  const recorrente = clienteEhRecorrente(charge, client);
+  const valor = Number(charge.valor) || 0;
+  const { doc, page, f, cor, W, M, yInicio, rodape, texto } = await pdfCriarBase(`Cobrança — ${nomeCliente}`, 'COBRANÇA');
+  const largura = W - 2 * M;
+  let y = yInicio - 34;
+
+  texto(recorrente ? 'Mensalidade' : 'Cobrança', M, y, 24, f.bold, cor.tinta);
+  y -= 20;
+  const sub = recorrente
+    ? `${client && client.plano ? client.plano + ' · ' : ''}Competência ${charge.competencia ? competenciaLabel(charge.competencia) : formatDateBR(charge.vencimento).slice(3)}`
+    : charge.descricao;
+  texto(sub, M, y, 11, f.reg, cor.suave);
+  y -= 22;
+
+  // Cartão com os dados principais
+  const altCard = 118;
+  page.drawRectangle({ x: M, y: y - altCard, width: largura, height: altCard, color: cor.fundo, borderColor: cor.linha, borderWidth: 0.8 });
+  const col2 = M + largura * 0.56;
+  const campo = (rotulo, valorTxt, x, yy, size = 12) => {
+    texto(rotulo, x, yy, 8, f.bold, cor.suave);
+    const linhas = pdfQuebrar(valorTxt, f.reg, size, (x === M + 16 ? col2 - M - 28 : W - M - 16 - x));
+    texto(linhas[0] || '', x, yy - 15, size, f.reg, cor.tinta);
+    if (linhas[1]) texto(linhas[1], x, yy - 15 - size - 2, size, f.reg, cor.tinta);
+  };
+  campo('CLIENTE', nomeCliente, M + 16, y - 22);
+  campo('VENCIMENTO', formatDateBR(charge.vencimento), col2, y - 22);
+  campo('REFERENTE A', charge.descricao || (recorrente ? 'Mensalidade' : 'Cobrança'), M + 16, y - 70);
+  texto('VALOR', col2, y - 70, 8, f.bold, cor.suave);
+  texto(charge.isenta ? 'Isenta' : formatCurrency(valor), col2, y - 94, 22, f.bold, cor.azul);
+  y -= altCard + 22;
+
+  // Cobrança dividida
+  if (client && client.cobrancaDividida && client.divisao && valor > 0 && !charge.isenta) {
+    const d = client.divisao;
+    const p1 = Math.round(valor * (Number(d.pct1) || 50)) / 100;
+    const p2 = Math.round((valor - p1) * 100) / 100;
+    texto('COBRANÇA DIVIDIDA', M, y, 8, f.bold, cor.suave);
+    texto(`${d.nome1}: ${formatCurrency(p1)}     ${d.nome2}: ${formatCurrency(p2)}`, M, y - 14, 10.5, f.reg, cor.tinta);
+    y -= 38;
+  }
+
+  // Bloco Pix com QR Code
+  const chavePix = pixNormalizarChave(settings.pix);
+  if (!charge.isenta && valor > 0 && chargeAceitaPix(charge, client) && chavePix) {
+    const cfg = pixConfigParaCliente(client);
+    const payload = pixPayload({ chave: chavePix, valor, nome: cfg.titular, cidade: settings.pixCidade });
+    if (typeof qrcode === 'undefined') throw new Error('A biblioteca de QR Code não carregou. Confira sua internet.');
+    const qr = qrcode(0, 'M'); qr.addData(payload); qr.make();
+    const n = qr.getModuleCount(), tam = 150, mod = tam / n, quiet = 8;
+    const topoBloco = y;
+    texto('PAGUE COM PIX', M, y, 11, f.bold, cor.azul);
+    y -= 14;
+    const qx = M, qy = y - tam - 2 * quiet;
+    page.drawRectangle({ x: qx, y: qy, width: tam + 2 * quiet, height: tam + 2 * quiet, color: PDFLib.rgb(1, 1, 1), borderColor: cor.linha, borderWidth: 0.8 });
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
+      if (qr.isDark(r, c)) page.drawRectangle({ x: qx + quiet + c * mod, y: qy + quiet + (n - 1 - r) * mod, width: mod + 0.15, height: mod + 0.15, color: cor.tinta });
+    }
+    const tx = qx + tam + 2 * quiet + 22;
+    let ty = y - 10;
+    texto('Abra o app do seu banco, escolha Pix e', tx, ty, 10, f.reg, cor.suave); ty -= 13;
+    texto('leia o QR Code (o valor já vem preenchido).', tx, ty, 10, f.reg, cor.suave); ty -= 26;
+    const info = (rotulo, v) => {
+      texto(rotulo, tx, ty, 8, f.bold, cor.suave); ty -= 14;
+      pdfQuebrar(v, f.reg, 11, W - M - tx).slice(0, 2).forEach(l => { texto(l, tx, ty, 11, f.reg, cor.tinta); ty -= 14; });
+      ty -= 8;
+    };
+    info(pixChaveRotulo(cfg.chaveExibida).toUpperCase(), cfg.chaveExibida);
+    info('BANCO', cfg.banco);
+    info('TITULAR', cfg.titular);
+    y = qy - 18;
+    texto('PIX COPIA E COLA', M, y, 8, f.bold, cor.suave);
+    const linhasCod = pdfQuebrar(payload, f.mono, 7.5, largura - 20);
+    const altCod = linhasCod.length * 9.5 + 14;
+    page.drawRectangle({ x: M, y: y - 6 - altCod, width: largura, height: altCod, color: cor.fundo, borderColor: cor.linha, borderWidth: 0.6 });
+    linhasCod.forEach((l, i) => texto(l, M + 10, y - 17 - i * 9.5, 7.5, f.mono, cor.tinta));
+    y -= altCod + 26;
+  }
+
+  // Outras formas (boleto / cartão), quando houver
+  const outras = [];
+  if (charge.boletoLink) outras.push('Boleto: ' + charge.boletoLink);
+  if (charge.boletoCodigo) outras.push('Código de barras: ' + charge.boletoCodigo);
+  if (charge.linkPagamentoCartao) outras.push('Pagar no cartão: ' + charge.linkPagamentoCartao);
+  if (outras.length) {
+    texto('OUTRAS FORMAS DE PAGAMENTO', M, y, 8, f.bold, cor.suave); y -= 14;
+    outras.forEach(o => pdfQuebrar(o, f.reg, 9.5, largura).forEach(l => { texto(l, M, y, 9.5, f.reg, cor.tinta); y -= 12.5; }));
+    y -= 14;
+  }
+
+  // Aviso de bloqueio
+  const aviso = `Importante: realize o pagamento até o dia do vencimento (${formatDateBR(charge.vencimento)}). Caso o pagamento não seja identificado, o sistema é automaticamente bloqueado, sendo liberado somente após a identificação do pagamento.`;
+  const linhasAviso = pdfQuebrar(aviso, f.reg, 10, largura - 28);
+  const altAviso = linhasAviso.length * 13.5 + 20;
+  page.drawRectangle({ x: M, y: y - altAviso, width: largura, height: altAviso, color: cor.alerta, borderColor: cor.alertaBorda, borderWidth: 0.9 });
+  linhasAviso.forEach((l, i) => texto(l, M + 14, y - 20 - i * 13.5, 10, i === 0 ? f.bold : f.reg, cor.tinta));
+  y -= altAviso + 12;
+  texto('Se você já pagou, pode desconsiderar este documento.', M, y, 9, f.reg, cor.suave);
+
+  rodape();
+  const bytes = await doc.save();
+  return {
+    blob: new Blob([bytes], { type: 'application/pdf' }),
+    filename: `cobranca-${nomeArquivoSeguro(nomeCliente)}-${charge.vencimento || todayISO()}.pdf`
+  };
+}
+
+// ======================================================================
+// RECIBO — novo layout (A4, logo, valor por extenso, assinatura, Netbug)
+// ======================================================================
+async function gerarReciboPDF(chargeId) {
+  try {
+    const charge = getCharges().find(c => c.id === chargeId);
+    if (!charge) throw new Error('Cobrança não encontrada.');
+    const client = charge.clientId ? clientById(charge.clientId) : null;
+    const nomeCliente = client ? client.nome : (charge.avulsoNome || 'Cliente avulso');
+    const settings = getSettings();
+    const { doc, page, f, cor, W, M, yInicio, rodape, texto } = await pdfCriarBase(`Recibo — ${nomeCliente}`, 'RECIBO DE PAGAMENTO');
+    const largura = W - 2 * M;
+    const valor = Number(charge.valor) || 0;
+    const numero = String(charge.id || '').slice(-6).toUpperCase() || '000000';
+    const dataPag = charge.dataPagamento || todayISO();
+    let y = yInicio - 36;
+
+    texto('Recibo', M, y, 26, f.bold, cor.tinta);
+    texto(`Nº ${numero}`, M + 100, y + 2, 12, f.reg, cor.suave);
+    y -= 34;
+
+    // Valor em destaque
+    page.drawRectangle({ x: M, y: y - 62, width: largura, height: 62, color: cor.fundo, borderColor: cor.linha, borderWidth: 0.8 });
+    texto('VALOR RECEBIDO', M + 16, y - 20, 8, f.bold, cor.suave);
+    texto(formatCurrency(valor), M + 16, y - 48, 24, f.bold, cor.azul);
+    y -= 62 + 28;
+
+    // Texto corrido
+    const extenso = valorPorExtenso(valor);
+    const corpo = `Recebemos de ${nomeCliente} a importância de ${formatCurrency(valor)} (${extenso}), referente a ${charge.descricao || 'prestação de serviços'}.`;
+    pdfQuebrar(corpo, f.reg, 12, largura).forEach(l => { texto(l, M, y, 12, f.reg, cor.tinta); y -= 18; });
+    y -= 10;
+
+    const par = (rotulo, v, x, yy) => { texto(rotulo, x, yy, 8, f.bold, cor.suave); texto(v, x, yy - 15, 11.5, f.reg, cor.tinta); };
+    const col2 = M + largura * 0.5;
+    par('DATA DO PAGAMENTO', formatDateBR(dataPag), M, y);
+    par('FORMA DE PAGAMENTO', charge.formaPagamentoUsada ? formaPagamentoLabel(charge.formaPagamentoUsada) : 'Pix', col2, y);
+    y -= 46;
+    par('VENCIMENTO ORIGINAL', formatDateBR(charge.vencimento), M, y);
+    if (charge.competencia) par('COMPETÊNCIA', competenciaLabel(charge.competencia), col2, y);
+    y -= 46;
+    texto('Pagamento identificado e confirmado. Obrigado pela confiança!', M, y, 10.5, f.reg, cor.suave);
+    y -= 70;
+
+    // Assinatura
+    const titular = settings.pixTitular || PIX_TITULAR_PADRAO;
+    page.drawLine({ start: { x: M, y }, end: { x: M + 240, y }, thickness: 0.7, color: cor.suave });
+    texto(titular, M, y - 14, 11, f.bold, cor.tinta);
+    texto('Dalton Neres | Developer', M, y - 28, 9.5, f.reg, cor.suave);
+
+    rodape(`Recibo emitido em ${formatDateBR(todayISO())}.`);
+    const bytes = await doc.save();
+    baixarArquivo(new Blob([bytes], { type: 'application/pdf' }), `recibo-${nomeArquivoSeguro(nomeCliente)}-${dataPag}.pdf`);
+  } catch (err) {
+    console.error(err);
+    alert('Não consegui gerar o recibo agora.\n\nErro técnico: ' + (err && err.message ? err.message : err));
+  }
 }
 
 // ---------- MENSALIDADES RECORRENTES + INDICAÇÕES ----------
@@ -534,6 +857,7 @@ function queuePersist() {
       colaboradores: _colaboradores.map(c => c.uid),
       colaboradoresInfo: _colaboradores,
       negociacoes: _negociacoes,
+      tickets: _tickets,
       saidas: _saidas,
       settings: _settings,
       updatedAt: new Date().toISOString()
@@ -582,6 +906,7 @@ function startFirestoreSync(donoUid) {
     _mensalidades = data.mensalidades || [];
     _colaboradores = data.colaboradoresInfo || (data.colaboradores || []).map(uid => ({ uid, apelido: '' }));
     _negociacoes = data.negociacoes || [];
+    _tickets = data.tickets || [];
     _saidas = data.saidas || [];
     _settings = data.settings || {};
     if (_settings.tema) {
@@ -661,7 +986,7 @@ function stopFirestoreSync() {
   if (_unsubscribeSnapshot) _unsubscribeSnapshot();
   _unsubscribeSnapshot = null;
   _docRef = null;
-  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _negociacoes = []; _saidas = []; _settings = {};
+  _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _negociacoes = []; _tickets = []; _saidas = []; _settings = {};
 }
 
 // ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
@@ -804,6 +1129,7 @@ function navigate(view) {
   const renderers = {
     dashboard: renderDashboard,
     clientes: renderClientes,
+    tickets: renderTickets,
     calculadora: renderCalculadora,
     cobrancas: renderCobrancas,
     saidas: renderSaidas,
@@ -2253,60 +2579,6 @@ function openComprovanteModal(chargeId) {
   };
 }
 
-async function gerarReciboPDF(chargeId) {
-  const charge = getCharges().find(c => c.id === chargeId);
-  const client = charge.clientId ? clientById(charge.clientId) : null;
-  const nomeCliente = client ? client.nome : (charge.avulsoNome || 'Cliente avulso');
-  const settings = getSettings();
-
-  const { PDFDocument, StandardFonts, rgb } = PDFLib;
-  const doc = await PDFDocument.create();
-  const page = doc.addPage([420, 560]);
-  const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
-  const fontRegular = await doc.embedFont(StandardFonts.Helvetica);
-  const inkColor = rgb(0.086, 0.137, 0.122);
-  const softColor = rgb(0.29, 0.35, 0.32);
-  let y = 500;
-
-  page.drawText('RECIBO', { x: 40, y, size: 22, font: fontBold, color: inkColor });
-  y -= 18;
-  page.drawText(settings.empresaNome || settings.seuNome || 'Caixa Aberto', { x: 40, y, size: 11, font: fontRegular, color: softColor });
-  y -= 40;
-
-  function linha(label, valor, tamanho = 11) {
-    page.drawText(label, { x: 40, y, size: 9, font: fontBold, color: softColor });
-    y -= 15;
-    page.drawText(valor, { x: 40, y, size: tamanho, font: fontRegular, color: inkColor });
-    y -= 28;
-  }
-
-  linha('RECEBEMOS DE', nomeCliente);
-  linha('REFERENTE A', charge.descricao);
-  linha('VALOR', formatCurrency(charge.valor), 16);
-  linha('DATA DO PAGAMENTO', formatDateBR(charge.dataPagamento || todayISO()));
-  if (charge.formaPagamentoUsada) {
-    linha('FORMA DE PAGAMENTO', formaPagamentoLabel(charge.formaPagamentoUsada));
-    if (charge.formaPagamentoUsada === 'pix' && settings.pix) linha('CHAVE PIX', settings.pix);
-  } else if (settings.pix) {
-    // Compatibilidade: recibos de cobranças antigas, marcadas como pagas
-    // antes de existir o campo "forma de pagamento usada".
-    linha('CHAVE PIX', settings.pix);
-  }
-
-  page.drawLine({ start: { x: 40, y: y - 4 }, end: { x: 380, y: y - 4 }, thickness: 0.5, color: softColor });
-  y -= 24;
-  page.drawText(`Emitido em ${formatDateBR(todayISO())} pelo Caixa Aberto.`, { x: 40, y, size: 8, font: fontRegular, color: softColor });
-
-  const bytes = await doc.save();
-  const blob = new Blob([bytes], { type: 'application/pdf' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `recibo-${nomeCliente.replace(/\s+/g, '-').toLowerCase()}-${charge.dataPagamento || todayISO()}.pdf`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 function openChargeModal(presets, onSaved) {
   presets = presets || {};
   const clients = getClients();
@@ -2827,7 +3099,7 @@ function openMeetingModal(meetingId, presetClientId, onSaved) {
 // obs: WhatsApp usa *asterisco* pra deixar o texto em negrito
 // Aviso de bloqueio + rodapé de mensagem automática (entram nas mensagens de cobrança)
 const AVISO_BLOQUEIO_TEXTO =
-`⚠️ *Importante:* caso o pagamento não seja identificado até as *18h do dia do vencimento*, o sistema é *automaticamente bloqueado*, sendo liberado somente após a identificação do pagamento, com prazo de liberação de até *48h*.`;
+`⚠️ *Importante:* caso o pagamento não seja identificado até o dia do vencimento, o sistema é *automaticamente bloqueado*, sendo liberado somente após a identificação do pagamento.`;
 
 function emitidaEmLabel(d) {
   d = d || new Date();
@@ -2835,7 +3107,7 @@ function emitidaEmLabel(d) {
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} - ${p(d.getHours())}:${p(d.getMinutes())}h`;
 }
 function rodapeAutomaticoTexto() {
-  return `_Esta é uma mensagem automática, gerada pelo Software Caixa Aberto | Dalton Neres._\n_Emitida em: ${emitidaEmLabel()}_`;
+  return `_Mensagem enviada pelo Netbug, agente virtual de IA de Dalton Neres | Developer._\n_Emitida em: ${emitidaEmLabel()}_`;
 }
 
 // Cobrança dividida (ex.: escola com duas responsáveis): discrimina a parte de cada uma.
@@ -2857,17 +3129,11 @@ function clienteUsaSistema(client) {
 }
 
 const MODELO_COBRANCA_PADRAO =
-`Olá, {nome}! Tudo bem? 😊
+`Prezado cliente, segue em anexo a sua cobrança ({descricao}) com vencimento para o dia *{vencimento_data}*.
 
-Passando para lembrar da sua *{descricao}* 🧾
-
-💰 *Valor:* {valor}
-{divisao}📅 *Vencimento:* {vencimento_data}
-{pagamento}
+{divisao}Acesse o arquivo acima para ter acesso às demais informações e realize o pagamento até o dia do vencimento.
 
 {aviso_bloqueio}
-
-Se já pagou, pode desconsiderar esta mensagem. Qualquer dúvida, é só chamar! 🙏
 
 {rodape_automatico}`;
 
@@ -2885,23 +3151,17 @@ function pixChaveRotulo(chave) {
 }
 
 const MODELO_RECORRENTE_PADRAO =
-`Olá, {nome}! Tudo bem? 😊
+`Prezado cliente, segue em anexo a sua mensalidade com vencimento para o dia *{vencimento_data}*.
 
-Passando para lembrar da sua *mensalidade de {competencia}* ({plano}) 🧾
-
-💰 *Valor:* {valor}
-{divisao}📅 *Vencimento:* {vencimento_data}
-{pagamento}
+{divisao}Acesse o arquivo acima para ter acesso às demais informações e realize o pagamento até o dia do vencimento.
 
 {aviso_bloqueio}
-
-Se já pagou, pode desconsiderar esta mensagem. Qualquer dúvida, é só chamar! 🙏
 
 {rodape_automatico}`;
 
 // Modelos salvos antes desta versão (com a "montoeira" de avisos) são ignorados
 // em favor do novo padrão enxuto; ao salvar de novo, vale o que a pessoa escrever.
-const MODELO_VERSAO = 3;
+const MODELO_VERSAO = 4;
 function modeloCobrancaAtual(s) {
   return (s.modeloVersao === MODELO_VERSAO && s.modeloCobranca) ? s.modeloCobranca : MODELO_COBRANCA_PADRAO;
 }
@@ -2961,8 +3221,7 @@ function montarVariaveisMensagemCobranca(charge, client, settings) {
     competencia: charge.competencia ? competenciaLabel(charge.competencia) : String(charge.vencimento || '').slice(5, 7) + '/' + String(charge.vencimento || '').slice(0, 4),
     plano: (client && client.plano) || '',
     divisao: linhaDivisaoCobranca(charge, client),
-    // Bloqueio só vale pra quem usa sistema; pra os outros, a linha some.
-    aviso_bloqueio: clienteUsaSistema(client) ? AVISO_BLOQUEIO_TEXTO : '',
+    aviso_bloqueio: AVISO_BLOQUEIO_TEXTO,
     rodape_automatico: rodapeAutomaticoTexto()
   };
 }
@@ -2999,7 +3258,7 @@ function openWhatsappModal(chargeId) {
   if (charge.enviadaEm && !confirm(`Esta cobrança já foi enviada em ${dataHoraBR(charge.enviadaEm)}. A cobrança é feita uma vez só — enviar de novo mesmo assim?`)) return;
   const falta = chargeFaltaDados(charge);
   if (falta.length && !confirm(`Essa cobrança ainda está sem ${falta.map(k => FALTA_LABEL[k]).join(' e ')}. Enviar assim mesmo?\n\n(Cancelar = voltar e anexar primeiro, no botão da cobrança.)`)) return;
-  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client), () => marcarCobrancaEnviada(chargeId));
+  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client), () => marcarCobrancaEnviada(chargeId), { pdf: () => gerarCobrancaPDF(chargeId) });
 }
 
 function buildMeetingMessage(meeting, client) {
@@ -3014,7 +3273,8 @@ function buildMeetingMessage(meeting, client) {
     `\n📅 Data: *${formatDateBR(meeting.data)}${meeting.hora ? ' às ' + meeting.hora : ''}*` +
     `${linhaContagem}` +
     `${meeting.local ? '\n📍 Local/link: ' + meeting.local : ''}` +
-    `\n\n😊 Qualquer imprevisto, me avisa por aqui. Até lá!`;
+    `\n\n😊 Qualquer imprevisto, me avisa por aqui. Até lá!` +
+    `\n\n${rodapeAutomaticoTexto()}`;
 }
 
 function buildBirthdayMessage(client) {
@@ -3023,7 +3283,8 @@ function buildBirthdayMessage(client) {
   return `🎉 Feliz aniversário, *${client.nome}*! 🎂` +
     `\n\nDesejo um dia incrível, cheio de alegria e realizações!` +
     `${quemFala ? '\nUm abraço, *' + quemFala + '*.' : ''}` +
-    `\n\n🥳🎈`;
+    `\n\n🥳🎈` +
+    `\n\n${rodapeAutomaticoTexto()}`;
 }
 
 function openMeetingWhatsappModal(meetingId) {
@@ -3033,9 +3294,16 @@ function openMeetingWhatsappModal(meetingId) {
   openSendWhatsappModal(`Enviar lembrete — ${client.nome}`, client, buildMeetingMessage(meeting, client));
 }
 
-function openSendWhatsappModal(title, client, defaultMsg, onSent) {
+// opts.pdf (opcional): função que devolve { blob, filename } — usada na cobrança em PDF.
+// O WhatsApp não aceita anexar arquivo por link (wa.me): no celular usamos o menu
+// "Compartilhar" do sistema (leva PDF + texto); no computador baixamos o PDF e
+// abrimos a conversa com a mensagem pronta, e você arrasta o PDF para ela.
+function openSendWhatsappModal(title, client, defaultMsg, onSent, opts) {
+  opts = opts || {};
+  const temPdf = typeof opts.pdf === 'function';
   openModal(`
     <div class="modal-title">${escapeHtml(title)}</div>
+    ${temPdf ? `<div class="field"><label class="field-label">Arquivo PDF da cobrança</label><div class="view-desc" id="waPdfStatus" style="margin:0;">Gerando o PDF…</div></div>` : ''}
     <div class="field">
       <label class="field-label">Mensagem (pode editar antes de enviar)</label>
       <textarea class="input" id="waMsg" style="min-height:170px;">${escapeHtml(defaultMsg)}</textarea>
@@ -3044,17 +3312,59 @@ function openSendWhatsappModal(title, client, defaultMsg, onSent) {
       <label class="field-label">Número do WhatsApp</label>
       <input class="input" id="waPhone" value="${escapeHtml(client.telefone)}">
     </div>
+    ${temPdf ? `<p class="view-desc" style="margin:0 0 12px;">📱 No celular, use <b>Enviar PDF + mensagem</b> e escolha o contato no WhatsApp. 💻 No computador, <b>Abrir WhatsApp</b> baixa o PDF e abre a conversa com a mensagem pronta — é só arrastar o PDF para ela.</p>` : ''}
     <div class="modal-actions" style="flex-wrap:wrap;">
       <button type="button" class="btn btn-ghost" id="btnCancelWa">Não enviar agora</button>
-      <button type="button" class="btn btn-whatsapp" id="btnOpenWa">Enviar no WhatsApp</button>
+      ${temPdf ? `<button type="button" class="btn btn-ghost" id="btnBaixarPdf" disabled>⬇️ Baixar PDF</button>
+      <button type="button" class="btn btn-whatsapp hidden" id="btnShareWa" disabled>📎 Enviar PDF + mensagem</button>` : ''}
+      <button type="button" class="btn btn-whatsapp" id="btnOpenWa">${temPdf ? 'Abrir WhatsApp' : 'Enviar no WhatsApp'}</button>
     </div>
   `);
   qs('#btnCancelWa').onclick = closeModal;
-  qs('#btnOpenWa').onclick = () => {
+
+  let pdfFile = null, pdfErro = null;
+  const pdfPronto = temPdf
+    ? Promise.resolve().then(() => opts.pdf()).then(r => {
+        pdfFile = new File([r.blob], r.filename, { type: 'application/pdf' });
+        const st = qs('#waPdfStatus'); if (st) st.textContent = '✓ ' + r.filename;
+        const b = qs('#btnBaixarPdf'); if (b) b.disabled = false;
+        const sh = qs('#btnShareWa');
+        if (sh && navigator.canShare && navigator.canShare({ files: [pdfFile] })) { sh.classList.remove('hidden'); sh.disabled = false; }
+      }).catch(err => {
+        console.error(err); pdfErro = err;
+        const st = qs('#waPdfStatus'); if (st) st.textContent = '⚠️ Não consegui gerar o PDF: ' + (err && err.message ? err.message : err);
+      })
+    : Promise.resolve();
+
+  const telefoneOk = () => {
     const phone = onlyDigits(qs('#waPhone').value);
-    const msg = qs('#waMsg').value;
-    if (phone.length < 10) { alert('Número de WhatsApp inválido.'); return; }
-    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`, '_blank');
+    if (phone.length < 10) { alert('Número de WhatsApp inválido.'); return null; }
+    return phone;
+  };
+
+  if (temPdf) {
+    qs('#btnBaixarPdf').onclick = () => { if (pdfFile) baixarArquivo(pdfFile, pdfFile.name); };
+    qs('#btnShareWa').onclick = async () => {
+      if (!pdfFile) return;
+      try {
+        await navigator.share({ files: [pdfFile], text: qs('#waMsg').value });
+        closeModal();
+        if (onSent) onSent();
+      } catch (err) {
+        if (err && err.name !== 'AbortError') alert('Não consegui abrir o compartilhamento: ' + err.message);
+      }
+    };
+  }
+
+  qs('#btnOpenWa').onclick = async () => {
+    const phone = telefoneOk(); if (!phone) return;
+    if (temPdf) {
+      await pdfPronto;
+      if (pdfErro && !confirm('O PDF não foi gerado. Enviar só a mensagem mesmo assim?')) return;
+    }
+    // abre a conversa primeiro (sem ser bloqueado como pop-up) e só depois baixa o PDF
+    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(qs('#waMsg').value)}`, '_blank');
+    if (temPdf && pdfFile) baixarArquivo(pdfFile, pdfFile.name);
     closeModal();
     if (onSent) onSent();
   };
@@ -3302,7 +3612,7 @@ function renderTabOrcamentos() {
     const o = getOrcamentos().find(x => x.id === b.dataset.followupOrcamento);
     const settings = getSettings();
     const quemFala = settings.seuNome || '';
-    const msg = `👋 Oi, *${o.nomeContato}*! ${quemFala ? 'Aqui é o ' + quemFala + '.' : ''} Passando só pra saber se você já conseguiu dar uma olhada no orçamento que te mandei. Fico à disposição pra qualquer dúvida! 🙂`;
+    const msg = `👋 Oi, *${o.nomeContato}*! ${quemFala ? 'Aqui é o ' + quemFala + '.' : ''} Passando só pra saber se você já conseguiu dar uma olhada no orçamento que te mandei. Fico à disposição pra qualquer dúvida! 🙂\n\n${rodapeAutomaticoTexto()}`;
     openSendWhatsappModal(`Follow-up — ${o.nomeContato}`, { nome: o.nomeContato, telefone: o.telefoneContato }, msg);
   });
   qsa('[data-status-orcamento]').forEach(sel => sel.onchange = () => {
@@ -3436,7 +3746,8 @@ function buildOrcamentoMessage(nomeContato, itens, plano, observacoes) {
     `${linhaObs}` +
     `\n\n💳 Formas de pagamento: Pix, boleto, cartão de crédito, cartão de débito ou dinheiro.` +
     `\n📆 Dá pra antecipar trimestral (2% off), semestral (4% off) ou anual (8% off) também 😉` +
-    `\n\n🙏 Qualquer dúvida, é só chamar!`;
+    `\n\n🙏 Qualquer dúvida, é só chamar!` +
+    `\n\n${rodapeAutomaticoTexto()}`;
 
   return { mensagem, totalUnico, totalMensal };
 }
@@ -4146,6 +4457,503 @@ function openSaidaModal(id) {
   };
 }
 
+// ---------- TICKETS (solicitações dos clientes) ----------
+// Fluxo: Aberto (prazo de 7 dias úteis) → Em andamento → Concluído (mostra o tempo gasto).
+// A cada etapa abre a mensagem pronta pro cliente (você só clica em enviar no WhatsApp).
+// Merge/descrição técnica ficam só na visão interna — não vão pro cliente.
+const TICKET_PRIORIDADES = { baixa: 'Baixa', media: 'Média', alta: 'Alta', urgente: 'Urgente' };
+const TICKET_PRIORIDADE_STAMP = { baixa: 'stamp-pausado', media: 'stamp-pendente', alta: 'stamp-atrasado', urgente: 'stamp-atrasado' };
+const TICKET_STATUS = { aberto: 'Aberto', em_andamento: 'Em andamento', concluido: 'Concluído' };
+const TICKET_STATUS_STAMP = { aberto: 'stamp-pausado', em_andamento: 'stamp-pendente', concluido: 'stamp-pago' };
+const TICKET_TIPOS = { bug: '🐞 Bug', manutencao: '🔧 Manutenção', melhoria: '✨ Melhoria' };
+const TICKET_TIPOS_TEXTO = { bug: 'Bug', manutencao: 'Manutenção', melhoria: 'Melhoria' };
+const ticketTipo = t => TICKET_TIPOS[t.tipo] ? t.tipo : 'manutencao';
+let _ticketAba = 'tickets'; // tickets | documentacao
+let _ticketTipoFiltro = 'todos';
+const TICKET_PRAZO_DIAS_UTEIS = 7; // sábados e domingos não contam (feriados não são considerados)
+let _ticketFiltro = 'ativos'; // ativos | aberto | em_andamento | concluido | todos
+
+function addDiasUteis(inicio, n) {
+  const d = new Date(inicio);
+  let contados = 0;
+  while (contados < n) {
+    d.setDate(d.getDate() + 1);
+    if (d.getDay() !== 0 && d.getDay() !== 6) contados++;
+  }
+  d.setHours(23, 59, 0, 0);
+  return d;
+}
+function ticketProximoNumero() {
+  const max = getTickets().reduce((m, t) => Math.max(m, parseInt(String(t.numero).replace(/\D/g, ''), 10) || 0), 0);
+  return 'TCK-' + String(max + 1).padStart(4, '0');
+}
+function formatarDuracao(ms) {
+  const min = Math.max(1, Math.round(ms / 60000));
+  const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
+  const partes = [];
+  if (d) partes.push(`${d} dia${d > 1 ? 's' : ''}`);
+  if (h) partes.push(`${h} h`);
+  if (m && !d) partes.push(`${m} min`);
+  return partes.join(' ') || '1 min';
+}
+// tempo gasto = do início do atendimento até a conclusão (se nunca foi iniciado, conta da abertura)
+function ticketTempoGastoMs(t) {
+  if (!t.concluidoEm) return null;
+  return new Date(t.concluidoEm) - new Date(t.iniciadoEm || t.abertoEm);
+}
+function ticketAtrasado(t) { return t.status !== 'concluido' && t.prazoEm && new Date(t.prazoEm) < new Date(); }
+function ticketDataISO(iso) { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+
+function ticketMensagemCliente(t, evento) {
+  const cab = {
+    aberto: `Prezado cliente, recebemos a sua solicitação e abrimos o ticket *${t.numero}*. 📩`,
+    em_andamento: `Prezado cliente, o ticket *${t.numero}* entrou em *andamento*. 🛠️ Nossa equipe já começou a trabalhar na sua solicitação.`,
+    concluido: `Prezado cliente, o ticket *${t.numero}* foi *concluído*. ✅`
+  }[evento];
+  let msg = `${cab}\n\n📌 *Assunto:* ${t.titulo}\n🏷️ *Tipo:* ${TICKET_TIPOS_TEXTO[ticketTipo(t)]}`;
+  if (evento === 'aberto') msg += `\n⚡ *Prioridade:* ${TICKET_PRIORIDADES[t.prioridade] || ''}`;
+  if (evento !== 'concluido') msg += `\n📅 *Prazo para conclusão:* até ${formatDateBR(ticketDataISO(t.prazoEm))} (até ${TICKET_PRAZO_DIAS_UTEIS} dias úteis)`;
+  if (evento === 'concluido') msg += `\n⏱️ *Tempo gasto:* ${formatarDuracao(ticketTempoGastoMs(t))}`;
+  if (evento === 'concluido' && ticketTipo(t) === 'melhoria') msg += `\n\n📄 Segue em anexo o relatório com os ajustes realizados, para a sua ciência. Acesse o arquivo acima para ver os detalhes.`;
+  msg += evento === 'concluido'
+    ? `\n\nSe precisar de algo mais, é só abrir uma nova solicitação. 🙏`
+    : `\n\nAvisaremos você a cada atualização. 🙏`;
+  return `${msg}\n\n${rodapeAutomaticoTexto()}`;
+}
+function ticketNotificar(ticketId, evento) {
+  const t = getTickets().find(x => x.id === ticketId);
+  if (!t) return;
+  const cli = clientById(t.clienteId);
+  if (!cli) { alert('Cliente do ticket não encontrado.'); return; }
+  const comRelatorio = evento === 'concluido' && ticketTipo(t) === 'melhoria';
+  openSendWhatsappModal(`Avisar cliente — ${t.numero}`, { nome: cli.nome, telefone: cli.telefone || '' }, ticketMensagemCliente(t, evento), () => {
+    saveTickets(getTickets().map(x => x.id !== ticketId ? x : { ...x, avisos: [...(x.avisos || []), { evento, em: new Date().toISOString() }] }));
+    if (currentView === 'tickets') renderTickets();
+  }, comRelatorio ? { pdf: () => gerarRelatorioMelhoriaPDF(ticketId) } : undefined);
+}
+
+function ticketIniciar(id) {
+  const agora = new Date().toISOString();
+  saveTickets(getTickets().map(t => t.id !== id ? t : { ...t, status: 'em_andamento', iniciadoEm: t.iniciadoEm || agora }));
+  renderTickets();
+  ticketNotificar(id, 'em_andamento');
+}
+
+
+// ---------- PDF: relatório de melhoria (ciência do cliente) ----------
+function formatarDocumentoBR(d) {
+  const n = String(d || '').replace(/\D/g, '');
+  if (n.length === 11) return n.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
+  if (n.length === 14) return n.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/, '$1.$2.$3/$4-$5');
+  return String(d || '');
+}
+async function gerarRelatorioMelhoriaPDF(ticketId) {
+  const t = getTickets().find(x => x.id === ticketId);
+  if (!t) throw new Error('Ticket não encontrado.');
+  const cli = clientById(t.clienteId) || { nome: 'Cliente' };
+  const { doc, page, f, cor, W, H, M, yInicio, rodape, texto } = await pdfCriarBase(`Relatório de melhoria — ${t.numero}`, 'RELATÓRIO DE MELHORIA');
+  const largura = W - 2 * M;
+  let pg = page, y = yInicio - 34;
+  const T = (txt, x, yy, size, font, color) => pg.drawText(pdfSeguro(txt), { x, y: yy, size, font, color });
+  const rodapeExtra = (p) => {
+    p.drawLine({ start: { x: M, y: 70 }, end: { x: W - M, y: 70 }, thickness: 0.6, color: cor.linha });
+    p.drawText(pdfSeguro('Documento gerado automaticamente pelo ' + NETBUG_ASSINATURA + '.'), { x: M, y: 54, size: 8.5, font: f.reg, color: cor.suave });
+  };
+  const garantir = (altura) => {
+    if (y - altura < 90) { pg = doc.addPage([W, H]); rodapeExtra(pg); y = H - M; }
+  };
+  const bloco = (titulo, corpo) => {
+    const linhas = pdfQuebrar(corpo || '—', f.reg, 11, largura);
+    garantir(40);
+    T(titulo, M, y, 8, f.bold, cor.suave); y -= 15;
+    linhas.forEach(l => { garantir(16); T(l, M, y, 11, f.reg, cor.tinta); y -= 15.5; });
+    y -= 12;
+  };
+
+  T('Melhoria realizada', M, y, 24, f.bold, cor.tinta); y -= 20;
+  T(`${t.numero} · ${t.titulo}`, M, y, 11, f.reg, cor.suave); y -= 22;
+
+  // dados do cliente
+  const linhasCli = [
+    ['CLIENTE', cli.nome], ['CPF/CNPJ', formatarDocumentoBR(cli.documento) || '—'],
+    ['E-MAIL', cli.email || '—'], ['CIDADE', cli.cidade || '—']
+  ];
+  const altCard = 110;
+  pg.drawRectangle({ x: M, y: y - altCard, width: largura, height: altCard, color: cor.fundo, borderColor: cor.linha, borderWidth: 0.8 });
+  linhasCli.forEach(([rot, val], i) => {
+    const x = M + 16 + (i % 2) * (largura * 0.5), yy = y - 22 - Math.floor(i / 2) * 46;
+    T(rot, x, yy, 8, f.bold, cor.suave);
+    T(pdfQuebrar(val, f.reg, 11.5, largura * 0.5 - 24)[0] || '', x, yy - 15, 11.5, f.reg, cor.tinta);
+  });
+  y -= altCard + 22;
+
+  // datas e responsáveis
+  const gasto = ticketTempoGastoMs(t);
+  const datas = [
+    ['SOLICITADO EM', dataHoraBR(t.abertoEm)],
+    ['INÍCIO DO ATENDIMENTO', t.iniciadoEm ? dataHoraBR(t.iniciadoEm) : '—'],
+    ['CONCLUÍDO EM', t.concluidoEm ? dataHoraBR(t.concluidoEm) : '—'],
+    ['TEMPO GASTO', gasto != null ? formatarDuracao(gasto) : '—']
+  ];
+  datas.forEach(([rot, val], i) => {
+    const x = M + (i % 2) * (largura * 0.5), yy = y - Math.floor(i / 2) * 40;
+    T(rot, x, yy, 8, f.bold, cor.suave); T(val, x, yy - 15, 11.5, f.reg, cor.tinta);
+  });
+  y -= 80;
+  T('RESPONSÁVEL TÉCNICO', M, y, 8, f.bold, cor.suave); T(t.responsavelTecnico || '—', M, y - 15, 11.5, f.reg, cor.tinta);
+  T('DESENVOLVIMENTO', M + largura * 0.5, y, 8, f.bold, cor.suave); T(t.responsavelDev || '—', M + largura * 0.5, y - 15, 11.5, f.reg, cor.tinta);
+  y -= 46;
+
+  pg.drawLine({ start: { x: M, y: y + 10 }, end: { x: W - M, y: y + 10 }, thickness: 0.6, color: cor.linha });
+  y -= 14;
+  bloco('SOLICITAÇÃO', t.descricao || t.titulo);
+  bloco('AJUSTES REALIZADOS', t.resumoCliente);
+  garantir(40);
+  T('Este relatório registra, para a sua ciência, os ajustes realizados na sua solicitação.', M, y, 9.5, f.reg, cor.suave);
+
+  rodape();
+  const bytes = await doc.save();
+  return { blob: new Blob([bytes], { type: 'application/pdf' }), filename: `melhoria-${t.numero}-${nomeArquivoSeguro(cli.nome)}.pdf` };
+}
+
+function renderTickets() {
+  if (_ticketAba === 'documentacao') { renderTicketsDocumentacao(); return; }
+  const todos = getTickets().slice().sort((a, b) => new Date(b.abertoEm) - new Date(a.abertoEm));
+  const abertos = todos.filter(t => t.status === 'aberto').length;
+  const andamento = todos.filter(t => t.status === 'em_andamento').length;
+  const atrasados = todos.filter(ticketAtrasado).length;
+  const mes = mesAtualISO();
+  const concluidosMes = todos.filter(t => t.status === 'concluido' && String(t.concluidoEm || '').startsWith(mes));
+  const mediaMs = concluidosMes.length ? concluidosMes.reduce((s, t) => s + ticketTempoGastoMs(t), 0) / concluidosMes.length : null;
+
+  const filtros = { ativos: 'Em aberto', aberto: 'Abertos', em_andamento: 'Em andamento', concluido: 'Concluídos', todos: 'Todos' };
+  const lista = todos.filter(t => (_ticketFiltro === 'todos' ? true : _ticketFiltro === 'ativos' ? t.status !== 'concluido' : t.status === _ticketFiltro) && (_ticketTipoFiltro === 'todos' || ticketTipo(t) === _ticketTipoFiltro));
+
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Tickets</div>
+        <div class="view-desc">O que os clientes solicitam e o que estamos fazendo — prazo de ${TICKET_PRAZO_DIAS_UTEIS} dias úteis e aviso ao cliente em cada etapa</div>
+      </div>
+      <button class="btn btn-primary" id="btnNovoTicket">+ Novo ticket</button>
+    </div>
+
+    ${ticketAbasHtml()}
+
+    <div class="cards-grid">
+      <div class="stat-card"><div class="stat-label">Abertos</div><div class="stat-value">${abertos}</div></div>
+      <div class="stat-card"><div class="stat-label">Em andamento</div><div class="stat-value">${andamento}</div></div>
+      <div class="stat-card"><div class="stat-label">Fora do prazo</div><div class="stat-value ${atrasados ? 'brick' : ''}">${atrasados}</div></div>
+      <div class="stat-card"><div class="stat-label">Concluídos no mês${mediaMs != null ? ' · média ' + formatarDuracao(mediaMs) : ''}</div><div class="stat-value">${concluidosMes.length}</div></div>
+    </div>
+
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+      <select class="input" id="tkFiltroTipo" style="max-width:200px;">
+        <option value="todos">Todos os tipos</option>
+        ${Object.entries(TICKET_TIPOS).map(([k, v]) => `<option value="${k}" ${_ticketTipoFiltro === k ? 'selected' : ''}>${v}</option>`).join('')}
+      </select>
+    </div>
+    <div class="tabs" role="tablist">
+      ${Object.entries(filtros).map(([k, v]) => `<button class="tab-btn ${_ticketFiltro === k ? 'active' : ''}" data-ticket-filtro="${k}" role="tab">${v}</button>`).join('')}
+    </div>
+
+    ${lista.length === 0 ? emptyState(todos.length ? 'Nada neste filtro' : 'Nenhum ticket ainda', todos.length ? 'Troque o filtro acima para ver os outros tickets.' : 'Clique em "+ Novo ticket" para registrar a primeira solicitação de um cliente.') : `
+    <div class="ledger">
+      ${lista.map(t => {
+        const cli = clientById(t.clienteId);
+        const atras = ticketAtrasado(t);
+        const gasto = ticketTempoGastoMs(t);
+        const avisou = ev => (t.avisos || []).some(a => a.evento === ev);
+        return `
+        <div class="ledger-row ticket-row">
+          <div class="ledger-main">
+            <div class="ledger-title"><span class="ticket-num">${escapeHtml(t.numero)}</span> ${escapeHtml(t.titulo)} <span class="avulso-tag">${TICKET_TIPOS[ticketTipo(t)]}</span></div>
+            <div class="ledger-sub">${escapeHtml(cli ? cli.nome : 'Cliente removido')} · aberto em ${dataHoraBR(t.abertoEm)} · prazo ${formatDateBR(ticketDataISO(t.prazoEm))}${atras ? ' <b style="color:var(--brick);">(fora do prazo)</b>' : ''}${gasto != null ? ' · ⏱️ ' + formatarDuracao(gasto) : ''}</div>
+            <div class="ledger-sub">Técnico: ${escapeHtml(t.responsavelTecnico || '—')} · Desenvolvimento: ${escapeHtml(t.responsavelDev || '—')}</div>
+            <details class="ticket-details">
+              <summary>Detalhes internos</summary>
+              <div class="ticket-detail-body">
+                <div><b>Descrição:</b> ${escapeHtml(t.descricao || '—')}</div>
+                <div><b>Merge / entrega:</b> ${escapeHtml(t.merge || '—')}</div>
+                <div><b>O que foi feito:</b> ${escapeHtml(t.resumoTecnico || '—')}</div>
+                ${ticketTipo(t) === 'melhoria' ? `<div><b>Texto para o cliente (relatório):</b> ${escapeHtml(t.resumoCliente || '—')}</div>` : ''}
+                <div class="ledger-sub" style="margin-top:6px;">
+                  Aberto ${dataHoraBR(t.abertoEm)}${t.iniciadoEm ? ' · iniciado ' + dataHoraBR(t.iniciadoEm) : ''}${t.concluidoEm ? ' · concluído ' + dataHoraBR(t.concluidoEm) : ''}
+                  ${(t.avisos || []).length ? '<br>Avisos ao cliente: ' + t.avisos.map(a => `${TICKET_STATUS[a.evento]} (${dataHoraBR(a.em)})`).join(', ') : ''}
+                </div>
+              </div>
+            </details>
+          </div>
+          <span class="stamp-badge ${TICKET_PRIORIDADE_STAMP[t.prioridade] || 'stamp-pausado'}">${TICKET_PRIORIDADES[t.prioridade] || ''}</span>
+          <span class="stamp-badge ${TICKET_STATUS_STAMP[t.status]}">${TICKET_STATUS[t.status]}</span>
+          <div class="ledger-actions" style="flex-wrap:wrap;">
+            ${t.status === 'aberto' ? `<button class="btn btn-primary btn-sm" data-ticket-iniciar="${t.id}">▶ Iniciar</button>` : ''}
+            ${t.status !== 'concluido' ? `<button class="btn btn-ghost btn-sm" data-ticket-concluir="${t.id}">✓ Concluir</button>` : ''}
+            ${t.status === 'concluido' && ticketTipo(t) === 'melhoria' ? `<button class="btn btn-ghost btn-sm" data-ticket-relatorio="${t.id}">📄 Relatório</button>` : ''}
+            ${cli ? `<button class="btn btn-whatsapp btn-sm" data-ticket-avisar="${t.id}" title="Avisar o cliente sobre a situação atual">${avisou(t.status) ? '✓ Avisado' : 'Avisar'}</button>` : ''}
+            <button class="btn btn-ghost btn-sm" data-ticket-edit="${t.id}">Editar</button>
+            <button class="btn btn-danger btn-sm" data-ticket-del="${t.id}">Excluir</button>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`}
+  `;
+
+  qs('#btnNovoTicket').onclick = () => openTicketModal();
+  ticketAbasBind();
+  qs('#tkFiltroTipo').onchange = (e) => { _ticketTipoFiltro = e.target.value; renderTickets(); };
+  qsa('[data-ticket-relatorio]').forEach(b => b.onclick = () => {
+    const t = getTickets().find(x => x.id === b.dataset.ticketRelatorio);
+    const cli = clientById(t.clienteId);
+    if (!cli) { alert('Cliente do ticket não encontrado.'); return; }
+    openSendWhatsappModal(`Relatório de melhoria — ${t.numero}`, { nome: cli.nome, telefone: cli.telefone || '' }, ticketMensagemCliente(t, 'concluido'), null, { pdf: () => gerarRelatorioMelhoriaPDF(t.id) });
+  });
+  qsa('[data-ticket-filtro]').forEach(b => b.onclick = () => { _ticketFiltro = b.dataset.ticketFiltro; renderTickets(); });
+  qsa('[data-ticket-iniciar]').forEach(b => b.onclick = () => ticketIniciar(b.dataset.ticketIniciar));
+  qsa('[data-ticket-concluir]').forEach(b => b.onclick = () => openTicketModal(b.dataset.ticketConcluir, { concluir: true }));
+  qsa('[data-ticket-avisar]').forEach(b => b.onclick = () => ticketNotificar(b.dataset.ticketAvisar, getTickets().find(x => x.id === b.dataset.ticketAvisar).status));
+  qsa('[data-ticket-edit]').forEach(b => b.onclick = () => openTicketModal(b.dataset.ticketEdit));
+  qsa('[data-ticket-del]').forEach(b => b.onclick = () => {
+    if (!confirm('Excluir este ticket? Essa ação não pode ser desfeita.')) return;
+    saveTickets(getTickets().filter(t => t.id !== b.dataset.ticketDel));
+    renderTickets();
+  });
+}
+
+
+function ticketAbasHtml() {
+  const nDocs = getTickets().filter(ticketTemDocumentacao).length;
+  return `<div class="tabs" role="tablist" style="margin-bottom:14px;">
+    <button class="tab-btn ${_ticketAba === 'tickets' ? 'active' : ''}" data-ticket-aba="tickets" role="tab">Tickets</button>
+    <button class="tab-btn ${_ticketAba === 'documentacao' ? 'active' : ''}" data-ticket-aba="documentacao" role="tab">Documentação <span class="tab-count">${nDocs}</span></button>
+  </div>`;
+}
+function ticketAbasBind() {
+  qsa('[data-ticket-aba]').forEach(b => b.onclick = () => { _ticketAba = b.dataset.ticketAba; renderTickets(); });
+}
+// entra na documentação todo ticket concluído ou que já tenha algo documentado
+function ticketTemDocumentacao(t) {
+  return t.status === 'concluido' || !!(t.docCausa || t.docArquivos || t.docObservacoes || t.resumoTecnico || t.merge);
+}
+
+// Base de conhecimento: o que foi desenvolvido em cada ticket, pra consultar em casos futuros.
+function renderTicketsDocumentacao() {
+  const itens = getTickets().filter(ticketTemDocumentacao).sort((a, b) => new Date(b.concluidoEm || b.abertoEm) - new Date(a.concluidoEm || a.abertoEm));
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Tickets</div>
+        <div class="view-desc">Documentação do que foi desenvolvido — pesquise por cliente, problema, arquivo ou solução antes de repetir o trabalho</div>
+      </div>
+    </div>
+    ${ticketAbasHtml()}
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
+      <input class="input" id="docBusca" placeholder="Buscar na documentação…" style="flex:1; min-width:220px;">
+      <select class="input" id="docTipo" style="max-width:200px;">
+        <option value="todos">Todos os tipos</option>
+        ${Object.entries(TICKET_TIPOS).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}
+      </select>
+    </div>
+    ${itens.length === 0 ? emptyState('Nada documentado ainda', 'Quando você concluir um ticket (ou preencher a documentação técnica nele), ele aparece aqui para consulta.') : `
+    <div class="ledger" id="docLista">
+      ${itens.map(t => {
+        const cli = clientById(t.clienteId);
+        const campos = [
+          ['Descrição da solicitação', t.descricao], ['Causa / contexto', t.docCausa], ['O que foi feito', t.resumoTecnico],
+          ['Arquivos / módulos afetados', t.docArquivos], ['Merge / entrega', t.merge], ['Cuidados para o futuro', t.docObservacoes]
+        ];
+        const busca = [t.numero, t.titulo, cli && cli.nome, TICKET_TIPOS_TEXTO[ticketTipo(t)], ...campos.map(c => c[1])].join(' ').toLowerCase();
+        return `
+        <div class="ledger-row ticket-row doc-item" data-tipo="${ticketTipo(t)}" data-busca="${escapeHtml(busca)}">
+          <div class="ledger-main">
+            <div class="ledger-title"><span class="ticket-num">${escapeHtml(t.numero)}</span> ${escapeHtml(t.titulo)} <span class="avulso-tag">${TICKET_TIPOS[ticketTipo(t)]}</span></div>
+            <div class="ledger-sub">${escapeHtml(cli ? cli.nome : 'Cliente removido')} · ${t.concluidoEm ? 'concluído em ' + dataHoraBR(t.concluidoEm) : TICKET_STATUS[t.status]}${ticketTempoGastoMs(t) != null ? ' · ⏱️ ' + formatarDuracao(ticketTempoGastoMs(t)) : ''} · Dev: ${escapeHtml(t.responsavelDev || '—')}</div>
+            <details class="ticket-details" open>
+              <summary>Documentação</summary>
+              <div class="ticket-detail-body">
+                ${campos.map(([rot, val]) => `<div><b>${rot}:</b> ${escapeHtml(val || '—')}</div>`).join('')}
+              </div>
+            </details>
+          </div>
+          <div class="ledger-actions"><button class="btn btn-ghost btn-sm" data-ticket-edit="${t.id}">Editar</button></div>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="empty-state hidden" id="docVazio"><div class="empty-title">Nenhum resultado</div></div>`}
+  `;
+  ticketAbasBind();
+  qsa('[data-ticket-edit]').forEach(b => b.onclick = () => openTicketModal(b.dataset.ticketEdit));
+  const filtrar = () => {
+    const termo = (qs('#docBusca').value || '').trim().toLowerCase(), tipo = qs('#docTipo').value;
+    let visiveis = 0;
+    qsa('.doc-item').forEach(el => {
+      const ok = (tipo === 'todos' || el.dataset.tipo === tipo) && (!termo || el.dataset.busca.includes(termo));
+      el.style.display = ok ? '' : 'none';
+      if (ok) visiveis++;
+    });
+    const v = qs('#docVazio'); if (v) v.classList.toggle('hidden', visiveis > 0);
+  };
+  if (qs('#docBusca')) { qs('#docBusca').addEventListener('input', filtrar); qs('#docTipo').onchange = filtrar; }
+}
+
+function openTicketModal(id, opts) {
+  opts = opts || {};
+  const editing = id ? getTickets().find(t => t.id === id) : null;
+  const clients = getClients();
+  if (!clients.length) { alert('Cadastre um cliente primeiro para abrir um ticket.'); return; }
+  const s = getSettings();
+  const nomes = Array.from(new Set([
+    s.seuNome, 'Dalton',
+    ...getColaboradores().map(c => c.apelido),
+    ...getNegociacoes().map(n => n.colaboradora),
+    ...getTickets().flatMap(t => [t.responsavelTecnico, t.responsavelDev])
+  ].filter(Boolean)));
+  const statusInicial = opts.concluir ? 'concluido' : (editing ? editing.status : 'aberto');
+  const numero = editing ? editing.numero : ticketProximoNumero();
+
+  openModal(`
+    <div class="modal-title">${opts.concluir ? 'Concluir ' + escapeHtml(numero) : editing ? 'Editar ' + escapeHtml(numero) : 'Novo ticket'}</div>
+    <form id="ticketForm">
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Nº do ticket</label>
+          <input class="input" value="${escapeHtml(numero)}" readonly>
+        </div>
+        <div class="field">
+          <label class="field-label">Aberto em (automático)</label>
+          <input class="input" value="${dataHoraBR(editing ? editing.abertoEm : new Date().toISOString())}" readonly>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Cliente</label>
+        <select class="input" id="tkCliente" required>
+          ${clients.map(c => `<option value="${c.id}" ${editing && editing.clienteId === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Tipo</label>
+          <select class="input" id="tkTipo">
+            ${Object.entries(TICKET_TIPOS).map(([k, v]) => `<option value="${k}" ${(editing ? ticketTipo(editing) : 'bug') === k ? 'selected' : ''}>${v}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label">Prioridade</label>
+          <select class="input" id="tkPrioridade">
+            ${Object.entries(TICKET_PRIORIDADES).map(([k, v]) => `<option value="${k}" ${(editing ? editing.prioridade : 'media') === k ? 'selected' : ''}>${v}</option>`).join('')}
+          </select>
+        </div>
+        ${editing ? `<div class="field">
+          <label class="field-label">Status do andamento</label>
+          <select class="input" id="tkStatus">
+            ${Object.entries(TICKET_STATUS).map(([k, v]) => `<option value="${k}" ${statusInicial === k ? 'selected' : ''}>${v}</option>`).join('')}
+          </select>
+        </div>` : ''}
+      </div>
+      <div class="field">
+        <label class="field-label">Assunto (o cliente vê este título)</label>
+        <input class="input" id="tkTitulo" required value="${editing ? escapeHtml(editing.titulo) : ''}" placeholder="Ex.: Ajustar o formulário de contato">
+      </div>
+      <div class="field">
+        <label class="field-label">Descrição da solicitação</label>
+        <textarea class="input" id="tkDescricao" style="min-height:80px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.descricao || '') : ''}</textarea>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Responsável técnico</label>
+          <input class="input" id="tkTecnico" list="tkNomes" value="${escapeHtml(editing ? editing.responsavelTecnico || '' : (s.seuNome || ''))}">
+        </div>
+        <div class="field">
+          <label class="field-label">Responsável pelo desenvolvimento</label>
+          <input class="input" id="tkDev" list="tkNomes" value="${escapeHtml(editing ? editing.responsavelDev || '' : '')}">
+        </div>
+        <datalist id="tkNomes">${nomes.map(n => `<option value="${escapeHtml(n)}">`).join('')}</datalist>
+      </div>
+      <div class="field">
+        <label class="field-label">Merge / entrega (link do pull request, branch ou commit — interno)</label>
+        <input class="input" id="tkMerge" value="${editing ? escapeHtml(editing.merge || '') : ''}" placeholder="Opcional até concluir">
+      </div>
+      <div class="field">
+        <label class="field-label">O que foi feito (interno — o cliente não vê)</label>
+        <textarea class="input" id="tkResumo" style="min-height:60px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.resumoTecnico || '') : ''}</textarea>
+      </div>
+      <div class="field hidden" id="tkResumoClienteField">
+        <label class="field-label">Ajustes realizados — texto para o cliente (vai no PDF da melhoria; obrigatório para concluir)</label>
+        <textarea class="input" id="tkResumoCliente" style="min-height:80px; font-family:inherit; font-size:14px;" placeholder="Explique em linguagem simples o que mudou, para o cliente ter ciência.">${editing ? escapeHtml(editing.resumoCliente || '') : ''}</textarea>
+      </div>
+      <div class="section-title" style="margin:6px 0 10px; font-size:15px;">Documentação técnica (interna — fica na aba Documentação)</div>
+      <div class="field">
+        <label class="field-label">Causa / contexto do problema</label>
+        <textarea class="input" id="tkDocCausa" style="min-height:56px; font-family:inherit; font-size:14px;">${editing ? escapeHtml(editing.docCausa || '') : ''}</textarea>
+      </div>
+      <div class="field">
+        <label class="field-label">Arquivos / módulos afetados</label>
+        <textarea class="input" id="tkDocArquivos" style="min-height:48px; font-family:inherit; font-size:14px;" placeholder="Ex.: app.js (gerarCobrancaPDF), style.css">${editing ? escapeHtml(editing.docArquivos || '') : ''}</textarea>
+      </div>
+      <div class="field">
+        <label class="field-label">Cuidados para o futuro</label>
+        <textarea class="input" id="tkDocObs" style="min-height:48px; font-family:inherit; font-size:14px;" placeholder="O que olhar se isso voltar a acontecer">${editing ? escapeHtml(editing.docObservacoes || '') : ''}</textarea>
+      </div>
+      ${editing ? '' : `<p class="view-desc" style="margin:0 0 12px;">Ao salvar, abre a mensagem pronta para avisar o cliente, com prazo de até ${TICKET_PRAZO_DIAS_UTEIS} dias úteis.</p>`}
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="btnCancelTicket">Cancelar</button>
+        <button type="submit" class="btn btn-primary">${opts.concluir ? 'Concluir ticket' : editing ? 'Salvar' : 'Abrir ticket'}</button>
+      </div>
+    </form>
+  `);
+  qs('#btnCancelTicket').onclick = closeModal;
+  const syncTipo = () => qs('#tkResumoClienteField').classList.toggle('hidden', qs('#tkTipo').value !== 'melhoria');
+  qs('#tkTipo').addEventListener('change', syncTipo);
+  syncTipo();
+  qs('#ticketForm').onsubmit = (e) => {
+    e.preventDefault();
+    const agora = new Date();
+    const dados = {
+      clienteId: qs('#tkCliente').value,
+      tipo: qs('#tkTipo').value,
+      prioridade: qs('#tkPrioridade').value,
+      titulo: qs('#tkTitulo').value.trim(),
+      descricao: qs('#tkDescricao').value.trim(),
+      responsavelTecnico: qs('#tkTecnico').value.trim(),
+      responsavelDev: qs('#tkDev').value.trim(),
+      merge: qs('#tkMerge').value.trim(),
+      resumoTecnico: qs('#tkResumo').value.trim(),
+      resumoCliente: qs('#tkResumoCliente').value.trim(),
+      docCausa: qs('#tkDocCausa').value.trim(),
+      docArquivos: qs('#tkDocArquivos').value.trim(),
+      docObservacoes: qs('#tkDocObs').value.trim()
+    };
+    if (!dados.titulo) return;
+    const statusFinal = editing ? qs('#tkStatus').value : 'aberto';
+    if (dados.tipo === 'melhoria' && statusFinal === 'concluido' && !dados.resumoCliente) {
+      alert('Para concluir uma melhoria, preencha o texto "Ajustes realizados" — ele vai no PDF que o cliente recebe.');
+      return;
+    }
+    const lista = getTickets().slice();
+    let ticket, evento = null;
+    if (!editing) {
+      ticket = { id: uid(), numero, abertoEm: agora.toISOString(), prazoEm: addDiasUteis(agora, TICKET_PRAZO_DIAS_UTEIS).toISOString(), status: 'aberto', avisos: [], ...dados };
+      lista.push(ticket);
+      evento = 'aberto';
+    } else {
+      const novoStatus = qs('#tkStatus').value;
+      ticket = { ...editing, ...dados };
+      if (novoStatus !== editing.status) {
+        ticket.status = novoStatus;
+        if (novoStatus === 'em_andamento' && !ticket.iniciadoEm) ticket.iniciadoEm = agora.toISOString();
+        if (novoStatus === 'concluido') ticket.concluidoEm = ticket.concluidoEm || agora.toISOString();
+        else ticket.concluidoEm = null; // reabrir limpa a conclusão
+        if (novoStatus !== 'aberto') evento = novoStatus;
+      }
+      lista[lista.findIndex(t => t.id === editing.id)] = ticket;
+    }
+    saveTickets(lista);
+    closeModal();
+    renderTickets();
+    if (evento) ticketNotificar(ticket.id, evento);
+  };
+}
+
 // ---------- NEGOCIAÇÕES (parcerias com colaboradora(s)) ----------
 // Aqui você registra, por projeto/cliente, o valor de contratação (pago
 // uma vez), a mensalidade (recorrente) e o percentual que a pessoa que te
@@ -4166,19 +4974,6 @@ function mensalidadeEstaPagaEsteMes(n) { return n.mensalidadePagaMes === mesAtua
 function renderNegociacoes() {
   const negociacoes = getNegociacoes();
   const clients = getClients();
-
-  if (clients.length === 0) {
-    qs('#main').innerHTML = `
-      <div class="view-header">
-        <div>
-          <div class="view-title">Negociações</div>
-          <div class="view-desc">Projetos em parceria — cliente, contratação, mensalidade e quanto cada colaboradora recebe</div>
-        </div>
-      </div>
-      ${emptyState('Cadastre um cliente primeiro', 'Pra registrar uma negociação você escolhe o cliente na lista de Clientes. Cadastre ao menos um pra começar.')}
-    `;
-    return;
-  }
 
   const totalMensal = negociacoes.reduce((sum, n) => sum + comissaoMensal(n), 0);
   const totalContratacaoAberta = negociacoes.filter(n => !n.contratacaoPaga).reduce((sum, n) => sum + comissaoContratacao(n), 0);
@@ -4250,7 +5045,7 @@ function renderNegociacoes() {
               return `
               <div class="ledger-row neg-row">
                 <div class="neg-client">
-                  <div class="ledger-title">${escapeHtml(cliente ? cliente.nome : 'Cliente removido')}</div>
+                  <div class="ledger-title">${escapeHtml(cliente ? cliente.nome : (n.projeto || 'Cliente removido'))}${!n.clienteId && n.projeto ? ' <span class="avulso-tag">outro projeto</span>' : ''}</div>
                   <div class="ledger-sub">${Number(n.percentual) || 0}% de comissão</div>
                   ${n.observacoes ? `<div class="ledger-sub" style="margin-top:4px;">${escapeHtml(n.observacoes)}</div>` : ''}
                 </div>
@@ -4321,9 +5116,14 @@ function openNegociacaoModal(id) {
     <form id="negociacaoForm">
       <div class="field">
         <label class="field-label">Cliente</label>
-        <select class="input" id="ngCliente" required>
+        <select class="input" id="ngCliente">
           ${clients.map(c => `<option value="${c.id}" ${editing && editing.clienteId === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}</option>`).join('')}
+          <option value="" ${editing && !editing.clienteId ? 'selected' : ''}>— Outro projeto (sem cliente cadastrado) —</option>
         </select>
+      </div>
+      <div class="field" id="ngProjetoField" style="display:none;">
+        <label class="field-label">Nome do projeto</label>
+        <input class="input" id="ngProjeto" placeholder="Ex.: Site da loja X" value="${editing ? escapeHtml(editing.projeto || '') : ''}">
       </div>
       <div class="field">
         <label class="field-label">Colaboradora</label>
@@ -4367,12 +5167,16 @@ function openNegociacaoModal(id) {
   };
   ['ngContratacao', 'ngMensalidade', 'ngPercentual'].forEach(idInput => qs('#' + idInput).addEventListener('input', atualizarPreview));
   atualizarPreview();
+  const syncProjeto = () => { qs('#ngProjetoField').style.display = qs('#ngCliente').value === '' ? '' : 'none'; };
+  qs('#ngCliente').addEventListener('change', syncProjeto);
+  syncProjeto();
 
   qs('#btnCancelNegociacao').onclick = closeModal;
   qs('#negociacaoForm').onsubmit = (e) => {
     e.preventDefault();
     const data = {
       clienteId: qs('#ngCliente').value,
+      projeto: qs('#ngCliente').value === '' ? qs('#ngProjeto').value.trim() : '',
       colaboradora: qs('#ngColaboradora').value.trim(),
       valorContratacao: Number(qs('#ngContratacao').value) || 0,
       valorMensalidade: Number(qs('#ngMensalidade').value) || 0,
@@ -4380,6 +5184,7 @@ function openNegociacaoModal(id) {
       observacoes: qs('#ngObservacoes').value.trim()
     };
     if (!data.colaboradora) return;
+    if (!data.clienteId && !data.projeto) { alert('Informe o nome do projeto.'); return; }
     const negociacoes = getNegociacoes();
     if (editing) {
       const idx = negociacoes.findIndex(n => n.id === editing.id);
@@ -5187,6 +5992,7 @@ async function gerarContratoPDF(registro) {
     wrapper.style.cssText = 'height:0; overflow:hidden;';
     const container = document.createElement('div');
     container.innerHTML = html;
+    if (!container.querySelector('img')) container.insertAdjacentHTML('afterbegin', '<div style="text-align:right; margin-bottom:12px;"><img src="images/dalton-neres-colorida.png" alt="Dalton Neres Developer" style="width:150px;"></div>');
     container.style.cssText = 'width:720px; padding:20px; font-family:Georgia,serif; font-size:12.5px; line-height:1.5; background:#fff; color:#111;';
     wrapper.appendChild(container);
     document.body.appendChild(wrapper);
@@ -5310,7 +6116,7 @@ function renderConfig() {
         <input class="input" id="sEmpresa" value="${escapeHtml(s.empresaNome || '')}">
       </div>
       <div class="field">
-        <label class="field-label">Chave Pix principal (a única usada nas cobranças)</label>
+        <label class="field-label">Chave Pix principal (a única usada nas cobranças — se for telefone, comece com +55)</label>
         <input class="input" id="sPix" value="${escapeHtml(s.pix || '')}">
       </div>
       <div class="field">
@@ -5322,13 +6128,17 @@ function renderConfig() {
         <input class="input" id="sPixTitular" value="${escapeHtml(s.pixTitular || PIX_TITULAR_PADRAO)}">
       </div>
       <div class="field">
+        <label class="field-label">Cidade da conta Pix (aparece no QR Code do PDF)</label>
+        <input class="input" id="sPixCidade" value="${escapeHtml(s.pixCidade || '')}" placeholder="Sua cidade">
+      </div>
+      <div class="field">
         <label class="field-label">Desconto por indicação (R$, opcional)</label>
         <input class="input" type="number" min="0" step="0.01" id="sDescontoIndicacao" value="${s.valorDescontoIndicacao != null ? s.valorDescontoIndicacao : ''}">
       </div>
       <button type="submit" class="btn btn-primary">Salvar</button>
     </form>
 
-    <div class="section-title">Mensagem de cobrança (WhatsApp)</div>
+    <div class="section-title">Mensagem que acompanha o PDF da cobrança (WhatsApp)</div>
     <p class="view-desc" style="margin-bottom:12px;">
       Personalize o texto que é montado ao enviar uma cobrança — pra soar do
       seu jeito, e não igual em toda cobrança. Use as variáveis abaixo, elas
@@ -5349,7 +6159,7 @@ function renderConfig() {
     <div class="field-label" style="margin-bottom:6px;">Pré-visualização (com dados de exemplo)</div>
     <div class="wa-preview" id="previewModeloCobranca" style="max-width:520px; margin-bottom:32px;"></div>
 
-    <div class="section-title">Mensagem de mensalidade (clientes recorrentes)</div>
+    <div class="section-title">Mensagem que acompanha o PDF da mensalidade (clientes recorrentes)</div>
     <p class="view-desc" style="margin-bottom:12px;">
       Texto usado só nas mensalidades dos clientes recorrentes. A parte do pagamento muda sozinha
       conforme o cliente paga (Pix, boleto ou cartão). Variáveis extras:
@@ -5500,6 +6310,7 @@ function renderConfig() {
       pix: qs('#sPix').value.trim(),
       pixBanco: qs('#sPixBanco').value.trim(),
       pixTitular: qs('#sPixTitular').value.trim(),
+      pixCidade: qs('#sPixCidade').value.trim(),
       valorDescontoIndicacao: qs('#sDescontoIndicacao').value === '' ? null : Number(qs('#sDescontoIndicacao').value)
     });
     refreshBrandBar();

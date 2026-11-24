@@ -954,3 +954,12 @@ button:focus-visible, .nav-btn:focus-visible, input:focus-visible{
   .cal-cell { min-height:46px; padding:4px; }
   .cal-total { margin-left:0; width:100%; }
 }
+
+/* ---------- Tickets ---------- */
+.ticket-num{font-family:var(--font-mono); font-size:12px; font-weight:600; color:var(--brand); background:var(--brand-bg); padding:2px 7px; border-radius:6px; margin-right:6px;}
+.ticket-row{align-items:flex-start; flex-wrap:wrap;}
+.ticket-details{margin-top:8px; font-size:13px;}
+.ticket-details summary{cursor:pointer; color:var(--brand); font-weight:500;}
+.ticket-detail-body{margin-top:8px; padding:10px 12px; background:var(--paper-alt); border-radius:8px; display:grid; gap:4px; color:var(--ink);}
+
+.doc-item .ticket-details{margin-top:6px;}

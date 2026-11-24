@@ -9,7 +9,7 @@
    (ativado em firebase-config.js com enablePersistence).
    ======================================================= */
 
-const CACHE_NAME = 'caixa-aberto-v5';
+const CACHE_NAME = 'caixa-aberto-v7';
 
 const APP_SHELL = [
   './',
@@ -17,6 +17,7 @@ const APP_SHELL = [
   './style.css',
   './app.js',
   './js/firebase-config.js',
+  './js/qrcode.js',
   './manifest.json',
   './images/icon-192.png',
   './images/icon-512.png',
