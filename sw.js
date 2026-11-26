@@ -9,7 +9,7 @@
    (ativado em firebase-config.js com enablePersistence).
    ======================================================= */
 
-const CACHE_NAME = 'caixa-aberto-v7';
+const CACHE_NAME = 'caixa-aberto-v20';
 
 const APP_SHELL = [
   './',
@@ -22,6 +22,8 @@ const APP_SHELL = [
   './images/icon-192.png',
   './images/icon-512.png',
   './images/icon-512-maskable.png',
+  './images/orvyn-logo.png',
+  './images/orvyn-logo-contract.png',
   './images/dalton-neres-colorida.png',
   './images/dalton-neres-branca.png'
 ];
@@ -70,3 +72,4 @@ self.addEventListener('fetch', (event) => {
       .catch(() => caches.match(event.request).then(r => r || caches.match('./index.html')))
   );
 });
+

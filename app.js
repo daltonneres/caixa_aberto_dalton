@@ -247,6 +247,7 @@ let _negociacoes = [];
 let _tickets = [];
 let _saidas = [];
 let _settings = {};
+let _orvyn = { clients: [], payments: [], expenses: [], transfers: [], settings: { partnerPercent: 50 } };
 let _docRef = null;
 let _unsubscribeSnapshot = null;
 let _saveTimer = null;
@@ -265,6 +266,8 @@ function getNegociacoes() { return _negociacoes; }
 function getTickets() { return _tickets; }
 function getSaidas() { return _saidas; }
 function getSettings() { return _settings; }
+function getOrvyn() { return _orvyn; }
+function getOrvynClients() { return getClients().filter(c => c.origem === 'orvyn'); }
 
 function saveClients(list) { _clients = list; queuePersist(); }
 function saveCharges(list) { _charges = list; queuePersist(); }
@@ -278,6 +281,7 @@ function saveNegociacoes(list) { _negociacoes = list; queuePersist(); }
 function saveTickets(list) { _tickets = list; queuePersist(); }
 function saveSaidas(list) { _saidas = list; queuePersist(); }
 function saveSettings(s) { _settings = s; queuePersist(); }
+function saveOrvyn(data) { _orvyn = { ..._orvyn, ...data }; queuePersist(); }
 
 function clientById(id) { return getClients().find(c => c.id === id); }
 
@@ -492,6 +496,11 @@ async function gerarCobrancaPDF(chargeId) {
   texto(charge.isenta ? 'Isenta' : formatCurrency(valor), col2, y - 94, 22, f.bold, cor.azul);
   y -= altCard + 22;
 
+  if (charge.isenta) {
+    texto('Mensalidade isenta — não há nada a pagar neste mês.', M, y, 11, f.reg, cor.tinta);
+    y -= 26;
+  }
+
   // Cobrança dividida
   if (client && client.cobrancaDividida && client.divisao && valor > 0 && !charge.isenta) {
     const d = client.divisao;
@@ -570,56 +579,62 @@ async function gerarCobrancaPDF(chargeId) {
 // ======================================================================
 // RECIBO — novo layout (A4, logo, valor por extenso, assinatura, Netbug)
 // ======================================================================
+// Monta o PDF do recibo e devolve { blob, filename } (serve para baixar e para enviar no WhatsApp)
+async function montarReciboPDF(chargeId) {
+  const charge = getCharges().find(c => c.id === chargeId);
+  if (!charge) throw new Error('Cobrança não encontrada.');
+  const client = charge.clientId ? clientById(charge.clientId) : null;
+  const nomeCliente = client ? client.nome : (charge.avulsoNome || 'Cliente avulso');
+  const settings = getSettings();
+  const { doc, page, f, cor, W, M, yInicio, rodape, texto } = await pdfCriarBase(`Recibo — ${nomeCliente}`, 'RECIBO DE PAGAMENTO');
+  const largura = W - 2 * M;
+  const valor = Number(charge.valor) || 0;
+  const numero = String(charge.id || '').slice(-6).toUpperCase() || '000000';
+  const dataPag = charge.dataPagamento || todayISO();
+  let y = yInicio - 36;
+
+  texto('Recibo', M, y, 26, f.bold, cor.tinta);
+  texto(`Nº ${numero}`, M + 100, y + 2, 12, f.reg, cor.suave);
+  y -= 34;
+
+  // Valor em destaque
+  page.drawRectangle({ x: M, y: y - 62, width: largura, height: 62, color: cor.fundo, borderColor: cor.linha, borderWidth: 0.8 });
+  texto('VALOR RECEBIDO', M + 16, y - 20, 8, f.bold, cor.suave);
+  texto(formatCurrency(valor), M + 16, y - 48, 24, f.bold, cor.azul);
+  y -= 62 + 28;
+
+  // Texto corrido
+  const extenso = valorPorExtenso(valor);
+  const corpo = `Recebemos de ${nomeCliente} a importância de ${formatCurrency(valor)} (${extenso}), referente a ${charge.descricao || 'prestação de serviços'}.`;
+  pdfQuebrar(corpo, f.reg, 12, largura).forEach(l => { texto(l, M, y, 12, f.reg, cor.tinta); y -= 18; });
+  y -= 10;
+
+  const par = (rotulo, v, x, yy) => { texto(rotulo, x, yy, 8, f.bold, cor.suave); texto(v, x, yy - 15, 11.5, f.reg, cor.tinta); };
+  const col2 = M + largura * 0.5;
+  par('DATA DO PAGAMENTO', formatDateBR(dataPag), M, y);
+  par('FORMA DE PAGAMENTO', charge.formaPagamentoUsada ? formaPagamentoLabel(charge.formaPagamentoUsada) : 'Pix', col2, y);
+  y -= 46;
+  par('VENCIMENTO ORIGINAL', formatDateBR(charge.vencimento), M, y);
+  if (charge.competencia) par('COMPETÊNCIA', competenciaLabel(charge.competencia), col2, y);
+  y -= 46;
+  texto('Pagamento identificado e confirmado. Obrigado pela confiança!', M, y, 10.5, f.reg, cor.suave);
+  y -= 70;
+
+  // Assinatura
+  const titular = settings.pixTitular || PIX_TITULAR_PADRAO;
+  page.drawLine({ start: { x: M, y }, end: { x: M + 240, y }, thickness: 0.7, color: cor.suave });
+  texto(titular, M, y - 14, 11, f.bold, cor.tinta);
+  texto('Dalton Neres | Developer', M, y - 28, 9.5, f.reg, cor.suave);
+
+  rodape(`Recibo emitido em ${formatDateBR(todayISO())}.`);
+  const bytes = await doc.save();
+  return { blob: new Blob([bytes], { type: 'application/pdf' }), filename: `recibo-${nomeArquivoSeguro(nomeCliente)}-${dataPag}.pdf` };
+}
+
 async function gerarReciboPDF(chargeId) {
   try {
-    const charge = getCharges().find(c => c.id === chargeId);
-    if (!charge) throw new Error('Cobrança não encontrada.');
-    const client = charge.clientId ? clientById(charge.clientId) : null;
-    const nomeCliente = client ? client.nome : (charge.avulsoNome || 'Cliente avulso');
-    const settings = getSettings();
-    const { doc, page, f, cor, W, M, yInicio, rodape, texto } = await pdfCriarBase(`Recibo — ${nomeCliente}`, 'RECIBO DE PAGAMENTO');
-    const largura = W - 2 * M;
-    const valor = Number(charge.valor) || 0;
-    const numero = String(charge.id || '').slice(-6).toUpperCase() || '000000';
-    const dataPag = charge.dataPagamento || todayISO();
-    let y = yInicio - 36;
-
-    texto('Recibo', M, y, 26, f.bold, cor.tinta);
-    texto(`Nº ${numero}`, M + 100, y + 2, 12, f.reg, cor.suave);
-    y -= 34;
-
-    // Valor em destaque
-    page.drawRectangle({ x: M, y: y - 62, width: largura, height: 62, color: cor.fundo, borderColor: cor.linha, borderWidth: 0.8 });
-    texto('VALOR RECEBIDO', M + 16, y - 20, 8, f.bold, cor.suave);
-    texto(formatCurrency(valor), M + 16, y - 48, 24, f.bold, cor.azul);
-    y -= 62 + 28;
-
-    // Texto corrido
-    const extenso = valorPorExtenso(valor);
-    const corpo = `Recebemos de ${nomeCliente} a importância de ${formatCurrency(valor)} (${extenso}), referente a ${charge.descricao || 'prestação de serviços'}.`;
-    pdfQuebrar(corpo, f.reg, 12, largura).forEach(l => { texto(l, M, y, 12, f.reg, cor.tinta); y -= 18; });
-    y -= 10;
-
-    const par = (rotulo, v, x, yy) => { texto(rotulo, x, yy, 8, f.bold, cor.suave); texto(v, x, yy - 15, 11.5, f.reg, cor.tinta); };
-    const col2 = M + largura * 0.5;
-    par('DATA DO PAGAMENTO', formatDateBR(dataPag), M, y);
-    par('FORMA DE PAGAMENTO', charge.formaPagamentoUsada ? formaPagamentoLabel(charge.formaPagamentoUsada) : 'Pix', col2, y);
-    y -= 46;
-    par('VENCIMENTO ORIGINAL', formatDateBR(charge.vencimento), M, y);
-    if (charge.competencia) par('COMPETÊNCIA', competenciaLabel(charge.competencia), col2, y);
-    y -= 46;
-    texto('Pagamento identificado e confirmado. Obrigado pela confiança!', M, y, 10.5, f.reg, cor.suave);
-    y -= 70;
-
-    // Assinatura
-    const titular = settings.pixTitular || PIX_TITULAR_PADRAO;
-    page.drawLine({ start: { x: M, y }, end: { x: M + 240, y }, thickness: 0.7, color: cor.suave });
-    texto(titular, M, y - 14, 11, f.bold, cor.tinta);
-    texto('Dalton Neres | Developer', M, y - 28, 9.5, f.reg, cor.suave);
-
-    rodape(`Recibo emitido em ${formatDateBR(todayISO())}.`);
-    const bytes = await doc.save();
-    baixarArquivo(new Blob([bytes], { type: 'application/pdf' }), `recibo-${nomeArquivoSeguro(nomeCliente)}-${dataPag}.pdf`);
+    const r = await montarReciboPDF(chargeId);
+    baixarArquivo(r.blob, r.filename);
   } catch (err) {
     console.error(err);
     alert('Não consegui gerar o recibo agora.\n\nErro técnico: ' + (err && err.message ? err.message : err));
@@ -693,7 +708,7 @@ function gerarMensalidadesRecorrentes() {
     let guard = 0;
     while (mes <= mesHoje && guard++ < 36) {
       const id = `rec-${cli.id}-${mes}`;
-      if (!ids.has(id)) {
+      if (!ids.has(id) && !cobMensalidadeNoMes(charges, cli.id, mes)) {
         const venc = `${mes}-${String(diaVencimentoValido(cli.diaVencimento)).padStart(2, '0')}`;
         const planoTxt = cli.plano || 'plano';
         const base = {
@@ -701,29 +716,25 @@ function gerarMensalidadesRecorrentes() {
           tipo: 'mensalidade', competencia: mes, recorrente: true,
           vencimento: venc, createdAt: todayISO(), linkPagamentoCartao: null, boletoLink: null, boletoCodigo: null
         };
-        if ((Number(cli.isencoesDisponiveis) || 0) > 0) {
+        const prog = (cli.isencoesProgramadas || []).find(p => p.mes === mes && !p.aplicadaEm);
+        if (prog || (Number(cli.isencoesDisponiveis) || 0) > 0) {
           charges.push({
             ...base,
             descricao: `Mensalidade ${competenciaLabel(mes)} — ${planoTxt} (isenta por indicação)`,
             valor: 0, valorOriginal: Number(cli.valorPlano),
             status: 'pago', dataPagamento: todayISO(), isenta: true, formasPagamento: []
           });
-          cli.isencoesDisponiveis = Number(cli.isencoesDisponiveis) - 1;
+          if (prog) cli.isencoesProgramadas = cli.isencoesProgramadas.map(p => p === prog ? { ...p, aplicadaEm: todayISO() } : p);
+          else cli.isencoesDisponiveis = Number(cli.isencoesDisponiveis) - 1;
           cli.isencoesUsadas = (Number(cli.isencoesUsadas) || 0) + 1;
         } else {
-          let nova = {
+          const nova = {
             ...base,
             descricao: `Mensalidade ${competenciaLabel(mes)} — ${planoTxt}`,
             valor: Number(cli.valorPlano),
             status: 'pendente', dataPagamento: null,
             formasPagamento: formasDaRecorrencia(cli, settings)
           };
-          const pctGuardado = Number(cli.descontoProximaPct) || 0;
-          if (pctGuardado > 0) {
-            nova = comDescontoAntecipado(nova, pctGuardado);
-            cli.descontoProximaPct = 0;
-            cli.descontoProximaOrigem = null;
-          }
           charges.push(nova);
         }
         ids.add(id);
@@ -742,61 +753,6 @@ function gerarMensalidadesRecorrentes() {
     queuePersist();
   }
   return criadas;
-}
-
-// ---------- DESCONTO POR PAGAMENTO ANTECIPADO ----------
-// Pagou no dia do vencimento (ou depois): sem desconto.
-// 1 dia antes = 1%, 2 dias = 2%, 3 dias = 3%, 4 dias = 4%, 5 dias ou mais = 5%.
-// O desconto vale para a PRÓXIMA mensalidade do cliente (só mensalidades
-// recorrentes, e não as isentas por indicação).
-const DESCONTO_ANTECIPACAO_MAX = 5;
-
-function diasDeAntecedencia(vencimentoISO, pagamentoISO) {
-  if (!vencimentoISO || !pagamentoISO) return 0;
-  const v = new Date(vencimentoISO + 'T00:00:00');
-  const p = new Date(pagamentoISO + 'T00:00:00');
-  return Math.round((v - p) / 86400000);
-}
-function descontoPorAntecedencia(vencimentoISO, pagamentoISO) {
-  const dias = diasDeAntecedencia(vencimentoISO, pagamentoISO);
-  if (!(dias >= 1)) return 0;
-  return Math.min(dias, DESCONTO_ANTECIPACAO_MAX);
-}
-function cobrancaGeraDescontoAntecipado(charge) {
-  return !!(charge && charge.clientId && charge.tipo === 'mensalidade' && charge.recorrente && !charge.isenta && Number(charge.valor) > 0);
-}
-// Aplica o desconto (em %) no valor de uma cobrança ainda em aberto.
-function comDescontoAntecipado(charge, pct) {
-  const original = Number(charge.valorOriginal) > 0 ? Number(charge.valorOriginal) : Number(charge.valor);
-  return {
-    ...charge,
-    valorOriginal: original,
-    valor: Math.round(original * (1 - pct / 100) * 100) / 100,
-    descontoPct: pct,
-    descricao: charge.descricao + ` (${pct}% de desconto por pagamento antecipado)`
-  };
-}
-// Chamado quando uma mensalidade é marcada como paga. Se foi paga antes do
-// vencimento, aplica o desconto na próxima mensalidade em aberto do cliente —
-// ou guarda no cliente, para ser usado quando a próxima for lançada.
-// Retorna { pct, dias, aplicadaAgora } ou null.
-function concederDescontoAntecipado(charge) {
-  if (!cobrancaGeraDescontoAntecipado(charge)) return null;
-  const pct = descontoPorAntecedencia(charge.vencimento, charge.dataPagamento);
-  if (pct <= 0) return null;
-  const dias = diasDeAntecedencia(charge.vencimento, charge.dataPagamento);
-  const proxima = getCharges()
-    .filter(c => c.id !== charge.id && c.clientId === charge.clientId && c.tipo === 'mensalidade' && c.recorrente &&
-      c.status !== 'pago' && !c.isenta && !c.descontoPct && c.vencimento > charge.vencimento)
-    .sort((a, b) => a.vencimento.localeCompare(b.vencimento))[0];
-  if (proxima) {
-    saveCharges(getCharges().map(c => c.id === proxima.id ? comDescontoAntecipado(c, pct) : c));
-    return { pct, dias, aplicadaAgora: true };
-  }
-  saveClients(getClients().map(c => c.id !== charge.clientId ? c : {
-    ...c, descontoProximaPct: pct, descontoProximaOrigem: charge.competencia || charge.vencimento.slice(0, 7)
-  }));
-  return { pct, dias, aplicadaAgora: false };
 }
 
 // Chamado quando uma cobrança é marcada como paga. Se for a 1ª mensalidade
@@ -860,6 +816,7 @@ function queuePersist() {
       tickets: _tickets,
       saidas: _saidas,
       settings: _settings,
+      orvyn: _orvyn,
       updatedAt: new Date().toISOString()
     }, { merge: true }).catch(err => {
       console.error('Erro ao salvar no Firebase:', err);
@@ -909,6 +866,30 @@ function startFirestoreSync(donoUid) {
     _tickets = data.tickets || [];
     _saidas = data.saidas || [];
     _settings = data.settings || {};
+    _orvyn = { clients: [], payments: [], expenses: [], transfers: [], settings: { partnerPercent: 50 }, ...(data.orvyn || {}) };
+    _orvyn.clients = Array.isArray(_orvyn.clients) ? _orvyn.clients : [];
+    _orvyn.payments = Array.isArray(_orvyn.payments) ? _orvyn.payments : [];
+    _orvyn.expenses = Array.isArray(_orvyn.expenses) ? _orvyn.expenses : [];
+    _orvyn.transfers = Array.isArray(_orvyn.transfers) ? _orvyn.transfers : [];
+    // Migra cadastros criados no antigo formulário separado do Studio para a
+    // carteira única de clientes, preservando os IDs usados nos recebimentos.
+    if (!snap.metadata.fromCache && _orvyn.clients.length) {
+      const ids = new Set(_clients.map(c => c.id));
+      const migrados = _orvyn.clients.filter(c => !ids.has(c.id)).map(c => ({
+        id: c.id, nome: c.nome || 'Cliente ORVYN', telefone: '', email: '', tipo: 'pj',
+        cidade: c.segmento || '', endereco: '', pastaDocumentos: '', clienteDesde: c.criadoEm || todayISO(),
+        planoId: null, plano: '', valorPlano: null, recorrente: false, projetos: [],
+        origem: 'orvyn', obs: [
+          c.contato ? `Contato: ${c.contato}` : '', c.projeto ? `Projeto: ${c.projeto}` : '',
+          Number(c.contratoValor) ? `Valor de contratação: ${formatCurrency(c.contratoValor)}` : '',
+          Number(c.mensalidade) ? `Mensalidade combinada: ${formatCurrency(c.mensalidade)}` : '',
+          c.contratoStatus ? `Status do contrato: ${c.contratoStatus === 'assinado' ? 'assinado' : 'em aberto'}` : ''
+        ].filter(Boolean).join('\n')
+      }));
+      if (migrados.length) _clients = [..._clients, ...migrados];
+      _orvyn = { ..._orvyn, clients: [] };
+      if (migrados.length || data.orvyn?.clients?.length) queuePersist();
+    }
     if (_settings.tema) {
       localStorage.setItem('ca_tema', _settings.tema);
       applyTheme(_settings.tema);
@@ -987,6 +968,7 @@ function stopFirestoreSync() {
   _unsubscribeSnapshot = null;
   _docRef = null;
   _clients = []; _charges = []; _meetings = []; _servicos = []; _orcamentos = []; _contratos = []; _mensalidades = []; _colaboradores = []; _negociacoes = []; _tickets = []; _saidas = []; _settings = {};
+  _orvyn = { clients: [], payments: [], expenses: [], transfers: [], settings: { partnerPercent: 50 } };
 }
 
 // ---------- AUTENTICAÇÃO (Firebase Auth — e-mail e senha de verdade) ----------
@@ -1046,6 +1028,8 @@ function initLockScreen() {
     const email = qs('#lockEmail').value.trim();
     const pass = qs('#lockPassword').value;
     submitBtn.disabled = true;
+    const textoOriginal = submitBtn.textContent;
+    submitBtn.textContent = 'Entrando…';
     try {
       if (authMode === 'signup') {
         if (pass !== confirmInput.value) throw { code: '', message: 'As senhas não coincidem.' };
@@ -1059,6 +1043,7 @@ function initLockScreen() {
       errorMsg.classList.remove('hidden');
     } finally {
       submitBtn.disabled = false;
+      submitBtn.textContent = textoOriginal;
     }
   };
 }
@@ -1121,22 +1106,30 @@ function applyDashboardValuesVisibility(hidden) {
   });
 }
 
-function navigate(view) {
+function navigate(view, options = {}) {
   currentDetailClientId = null;
   currentView = view;
+  if (view === 'orvyn') _orvynSubpage = options.orvynSubpage || 'home';
+  if (view === 'contratos') _contratosOrigemFiltro = options.origem || 'orvyn';
   applyDashboardValuesVisibility(view === 'dashboard' && _dashboardValuesHidden);
   qsa('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === (view === 'mensalidades' ? 'servicos' : view)));
+  const navAtivo = qs('.nav-btn.active');
+  if (navAtivo && navAtivo.scrollIntoView) navAtivo.scrollIntoView({ block: 'nearest' });
   const renderers = {
     dashboard: renderDashboard,
     clientes: renderClientes,
     tickets: renderTickets,
     calculadora: renderCalculadora,
     cobrancas: renderCobrancas,
+    recorrencias: renderRecorrencias,
+    indicacoes: renderIndicacoes,
+    financeiro: renderFinanceiroHub,
     saidas: renderSaidas,
     agenda: renderAgenda,
     servicos: renderServicos,
     mensalidades: renderMensalidades, // atalho antigo: abre a aba dentro de Serviços
     negociacoes: renderNegociacoes,
+    orvyn: renderOrvyn,
     relatorios: renderRelatorios,
     repositorios: renderRepositorios,
     contratos: renderContratos,
@@ -1626,7 +1619,7 @@ function renderDashboard() {
 }
 
 // ---------- CLIENTES ----------
-let _clientesFiltro = { busca: '', status: 'todos', ordem: 'nome' };
+let _clientesFiltro = { busca: '', status: 'todos', ordem: 'nome', origem: 'todos' };
 
 function semAcento(s) { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
 function iniciaisNome(nome) {
@@ -1686,6 +1679,11 @@ function renderClientes() {
           <option value="emdia" ${_clientesFiltro.status === 'emdia' ? 'selected' : ''}>Em dia</option>
           <option value="recorrente" ${_clientesFiltro.status === 'recorrente' ? 'selected' : ''}>Mensalidade automática</option>
         </select>
+        <select class="input filter-select" id="cliOrigem">
+          <option value="todos" ${_clientesFiltro.origem === 'todos' ? 'selected' : ''}>Todas as carteiras</option>
+          <option value="pessoal" ${_clientesFiltro.origem === 'pessoal' ? 'selected' : ''}>Dalton Neres Developer</option>
+          <option value="orvyn" ${_clientesFiltro.origem === 'orvyn' ? 'selected' : ''}>ORVYN</option>
+        </select>
         <select class="input filter-select" id="cliOrdem">
           <option value="nome" ${_clientesFiltro.ordem === 'nome' ? 'selected' : ''}>Ordem: nome (A–Z)</option>
           <option value="aberto" ${_clientesFiltro.ordem === 'aberto' ? 'selected' : ''}>Ordem: maior valor em aberto</option>
@@ -1702,6 +1700,8 @@ function renderClientes() {
   function pintarLista() {
     const termo = semAcento(_clientesFiltro.busca.trim());
     let lista = clients.filter(c => {
+      if (_clientesFiltro.origem === 'orvyn' && c.origem !== 'orvyn') return false;
+      if (_clientesFiltro.origem === 'pessoal' && c.origem === 'orvyn') return false;
       if (termo) {
         const alvo = semAcento([c.nome, c.telefone, c.email, c.cidade, c.plano].join(' '));
         if (!alvo.includes(termo)) return false;
@@ -1730,7 +1730,7 @@ function renderClientes() {
           <div class="ledger-row client-row client-row-click" data-row-client="${c.id}">
             <div class="client-avatar">${escapeHtml(iniciaisNome(c.nome))}</div>
             <div class="ledger-main">
-              <div class="ledger-title">${escapeHtml(c.nome)}${c.plano ? ` <span class="avulso-tag">${escapeHtml(c.plano)}</span>` : ''}</div>
+              <div class="ledger-title">${escapeHtml(c.nome)}${c.origem === 'orvyn' ? ' <span class="orvyn-client-tag">ORVYN</span>' : ''}${c.plano ? ` <span class="avulso-tag">${escapeHtml(c.plano)}</span>` : ''}</div>
               <div class="ledger-sub">${contato}</div>
             </div>
             <div class="client-status">
@@ -1770,6 +1770,7 @@ function renderClientes() {
 
   qs('#cliBusca').oninput = (e) => { _clientesFiltro.busca = e.target.value; pintarLista(); };
   qs('#cliStatus').onchange = (e) => { _clientesFiltro.status = e.target.value; pintarLista(); };
+  qs('#cliOrigem').onchange = (e) => { _clientesFiltro.origem = e.target.value; pintarLista(); };
   qs('#cliOrdem').onchange = (e) => { _clientesFiltro.ordem = e.target.value; pintarLista(); };
   pintarLista();
 }
@@ -1781,6 +1782,7 @@ function openClientModal(id, onSaved) {
   openModal(`
     <div class="modal-title">${editing ? 'Editar cliente' : 'Novo cliente'}</div>
     <form id="clientForm">
+      <div class="field"><label class="field-label">Carteira / origem</label><select class="input" id="cOrigem"><option value="pessoal" ${editing?.origem !== 'orvyn' ? 'selected' : ''}>Dalton Neres Developer</option><option value="orvyn" ${editing?.origem === 'orvyn' ? 'selected' : ''}>ORVYN</option></select><div class="view-desc" style="margin-top:5px;">Clientes, projetos e contratos ficam nesta carteira. O Studio acompanha o financeiro dos clientes ORVYN.</div></div>
       <div class="field">
         <label class="field-label">Nome</label>
         <input class="input" id="cNome" required value="${editing ? escapeHtml(editing.nome) : ''}">
@@ -1940,7 +1942,7 @@ function openClientModal(id, onSaved) {
       </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="btnCancelClient">Cancelar</button>
-        <button type="submit" class="btn btn-primary">${editing ? 'Salvar' : 'Cadastrar'}</button>
+        <button type="submit" class="btn btn-primary" id="clientSubmit">${editing ? 'Salvar' : 'Cadastrar'}</button>
       </div>
     </form>
   `);
@@ -2047,6 +2049,7 @@ function openClientModal(id, onSaved) {
 
     const clients = getClients();
     const extra = {
+      origem: qs('#cOrigem').value === 'orvyn' ? 'orvyn' : 'pessoal',
       tipo: tipoCliente,
       documento: documentoDigits,
       cidade: qs('#cCidade').value.trim(),
@@ -2138,7 +2141,6 @@ function renderClienteDetalhe(clientId) {
         <div class="stat-label">Plano</div>
         <div class="stat-value" style="font-size:16px;">${client.plano ? escapeHtml(client.plano) : '—'}</div>
         ${client.valorPlano != null ? `<div class="view-desc" style="margin-top:4px;">${formatCurrency(client.valorPlano)}/mês</div>` : ''}
-        ${Number(client.descontoProximaPct) > 0 ? `<div class="view-desc" style="margin-top:4px;">🎁 ${Number(client.descontoProximaPct)}% de desconto já garantido na próxima mensalidade (pagamento antecipado)</div>` : ''}
         ${client.cobrancaDividida && client.divisao ? `<div class="view-desc" style="margin-top:4px;">👥 Cobrança dividida: ${escapeHtml(client.divisao.nome1)} (${client.divisao.pct1}%) e ${escapeHtml(client.divisao.nome2)} (${Math.round((100 - client.divisao.pct1) * 100) / 100}%)</div>` : ''}
         ${client.recorrente ? `<div class="view-desc" style="margin-top:4px;">🔁 Lançamento automático, vence dia ${diaVencimentoValido(client.diaVencimento)} · paga via ${{ pix: 'Pix', boleto: 'boleto', cartao: 'cartão' }[formaRecorrenciaDoCliente(client)]}</div>` : ''}
       </div>
@@ -2324,7 +2326,7 @@ function renderCobrancas() {
   `;
 
   qs('#btnNovaCobranca').onclick = () => openChargeModal();
-  qs('#btnVerRecorrencias').onclick = () => { _servicosTab = 'mensalidades'; _mensSubtab = 'recorrentes'; navigate('servicos'); };
+  qs('#btnVerRecorrencias').onclick = () => navigate('recorrencias');
   bindChargeActions();
 }
 
@@ -2366,17 +2368,18 @@ function renderChargeLedger(charges, opts = {}) {
         return `
         <div class="ledger-row">
           <div class="ledger-main">
-            <div class="ledger-title">${escapeHtml(nomeExibicao)}${!client && c.avulsoNome ? ' <span class="avulso-tag">avulsa</span>' : ''}${c.recorrente ? ' <span class="avulso-tag">🔁 mensal</span>' : ''}${chargeFaltaDados(c).length ? ` <span class="avulso-tag" style="background:var(--stamp-pendente-bg, #f3e3b3);">⏳ falta ${chargeFaltaDados(c).map(k => FALTA_LABEL[k]).join(' e ')}</span>` : ''}</div>
+            <div class="ledger-title">${escapeHtml(nomeExibicao)}${!client && c.avulsoNome ? ' <span class="avulso-tag">avulsa</span>' : ''}${c.recorrente ? ' <span class="avulso-tag">🔁 mensal</span>' : ''}${['contratacao_inicial', 'contratacao_final'].includes(c.tipoCobranca) ? ` <span class="avulso-tag">${TIPOS_COBRANCA_ROTULO[c.tipoCobranca]}</span>` : ''}${chargeFaltaDados(c).length ? ` <span class="avulso-tag" style="background:var(--stamp-pendente-bg, #f3e3b3);">⏳ falta ${chargeFaltaDados(c).map(k => FALTA_LABEL[k]).join(' e ')}</span>` : ''}</div>
             <div class="ledger-sub">${escapeHtml(c.descricao)} · vence ${formatDateBR(c.vencimento)}${status === 'pago' && c.formaPagamentoUsada ? ' · pago via ' + formaPagamentoLabel(c.formaPagamentoUsada) : ''}</div>
           </div>
           <span class="stamp-badge ${stampClass}">${stampLabel}</span>
           <div class="ledger-value ${opts.compact ? 'dashboard-money-value' : ''}">${formatCurrency(c.valor)}</div>
           <div class="ledger-actions">
             ${status !== 'pago' && !c.isenta && (c.formasPagamento || []).some(f => f === 'boleto' || f === 'cartao') ? `<button class="btn btn-ghost btn-sm" data-dados-charge="${c.id}">${(c.formasPagamento || []).includes('boleto') && (c.formasPagamento || []).includes('cartao') ? '🧾 Boleto/cartão' : (c.formasPagamento || []).includes('boleto') ? '🧾 Boleto' : '💳 Link cartão'}</button>` : ''}
-            ${status !== 'pago' && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">${c.enviadaEm ? '✓ Enviada' : 'Enviar'}</button>` : ''}
+            ${(status !== 'pago' || c.isenta) && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${c.id}">${c.enviadaEm ? '✓ Enviada' : 'Enviar'}</button>` : ''}
             ${status !== 'pago' ? `<button class="btn btn-ghost btn-sm" data-pay-charge="${c.id}">Marcar pago</button>` : ''}
             ${podeIsentar ? `<button class="btn btn-ghost btn-sm" data-isentar-charge="${c.id}">🎁 Isentar</button>` : ''}
             ${status === 'pago' && !c.isenta ? `<button class="btn btn-ghost btn-sm" data-recibo-charge="${c.id}">🧾 Recibo</button>` : ''}
+            ${status === 'pago' && !c.isenta && temContato ? `<button class="btn btn-whatsapp btn-sm" data-send-recibo="${c.id}">📲 Enviar recibo</button>` : ''}
             ${status === 'pago' && !c.isenta && c.comprovanteLink ? `<a class="btn btn-ghost btn-sm" href="${escapeHtml(c.comprovanteLink)}" target="_blank" rel="noopener">📎 Comprovante</a>` : ''}
             ${status === 'pago' && !c.isenta && !c.comprovanteLink ? `<button class="btn btn-ghost btn-sm" data-add-comprovante="${c.id}">📎 + Comprovante</button>` : ''}
             ${!opts.compact ? `<button class="btn btn-danger btn-sm" data-del-charge="${c.id}">Excluir</button>` : ''}
@@ -2400,6 +2403,7 @@ function bindChargeActions() {
   qsa('[data-isentar-charge]').forEach(b => b.onclick = () => isentarCobranca(b.dataset.isentarCharge));
   qsa('[data-add-comprovante]').forEach(b => b.onclick = () => openComprovanteModal(b.dataset.addComprovante));
   qsa('[data-recibo-charge]').forEach(b => b.onclick = () => gerarReciboPDF(b.dataset.reciboCharge));
+  qsa('[data-send-recibo]').forEach(b => b.onclick = () => openReciboWhatsappModal(b.dataset.sendRecibo));
   qsa('[data-del-charge]').forEach(b => b.onclick = () => {
     if (confirm('Excluir esta cobrança?')) {
       saveCharges(getCharges().filter(c => c.id !== b.dataset.delCharge));
@@ -2499,7 +2503,6 @@ function openMarkPaidModal(chargeId) {
     <div class="field">
       <label class="field-label">Data do pagamento</label>
       <input class="input" type="date" id="mpData" value="${todayISO()}">
-      <div class="view-desc" id="mpDescontoInfo" style="margin-top:6px;"></div>
     </div>
     <div class="field">
       <label class="field-label">Link do comprovante (opcional)</label>
@@ -2511,20 +2514,6 @@ function openMarkPaidModal(chargeId) {
     </div>
   `);
   qs('#btnCancelPago').onclick = closeModal;
-  const atualizarInfoDesconto = () => {
-    const el = qs('#mpDescontoInfo');
-    if (!el) return;
-    if (!cobrancaGeraDescontoAntecipado(charge)) { el.textContent = ''; return; }
-    const dataPg = qs('#mpData').value || todayISO();
-    const pct = descontoPorAntecedencia(charge.vencimento, dataPg);
-    const dias = diasDeAntecedencia(charge.vencimento, dataPg);
-    el.textContent = pct > 0
-      ? `🎁 Pago ${dias} dia${dias > 1 ? 's' : ''} antes do vencimento: o cliente ganha ${pct}% de desconto na próxima mensalidade.`
-      : 'Pagamento no dia do vencimento (ou depois): sem desconto na próxima mensalidade.';
-  };
-  qs('#mpData').addEventListener('input', atualizarInfoDesconto);
-  qs('#mpData').addEventListener('change', atualizarInfoDesconto);
-  atualizarInfoDesconto();
   qs('#btnConfirmPago').onclick = () => {
     let link = qs('#mpComprovante').value.trim();
     if (link && !/^https?:\/\//i.test(link)) link = 'https://' + link;
@@ -2536,12 +2525,7 @@ function openMarkPaidModal(chargeId) {
     charges[idx].formaPagamentoUsada = qs('#mpForma').value;
     saveCharges(charges);
     const premiado = concederIsencaoPorIndicacao(charges[idx]);
-    const descontoAntecipado = concederDescontoAntecipado(charges[idx]);
     closeModal();
-    if (descontoAntecipado) {
-      const cliDesc = clientById(charges[idx].clientId);
-      alert(`🎁 Pagamento ${descontoAntecipado.dias} dia${descontoAntecipado.dias > 1 ? 's' : ''} antes do vencimento: ${cliDesc ? cliDesc.nome : 'o cliente'} ganhou ${descontoAntecipado.pct}% de desconto na próxima mensalidade${descontoAntecipado.aplicadaAgora ? ' (já aplicado na cobrança em aberto).' : ' (será aplicado quando ela for lançada).'}`);
-    }
     if (premiado) alert(`🎁 ${premiado} ganhou 1 mensalidade isenta por essa indicação! Ela será usada na próxima mensalidade recorrente dele(a) — ou use o botão "Isentar" numa mensalidade em aberto.`);
     const cliPago = charges[idx].clientId ? clientById(charges[idx].clientId) : null;
     if (charges[idx].recorrente && cliPago && formaRecorrenciaDoCliente(cliPago) !== 'pix') {
@@ -2618,6 +2602,18 @@ function openChargeModal(presets, onSaved) {
       </div>
 
       <div class="field">
+        <label class="field-label">Tipo da cobrança</label>
+        <select class="input" id="chTipoCobranca">
+          <option value="unica" ${!presets.tipo && !presets.tipoCobranca ? 'selected' : ''}>Cobrança única (avulsa)</option>
+          <option value="mensalidade" ${presets.tipo === 'mensalidade' ? 'selected' : ''}>Mensalidade (só este mês)</option>
+          <option value="mensalidade_recorrente">Mensalidade recorrente (repete todo mês)</option>
+          <option value="contratacao_inicial" ${presets.tipoCobranca === 'contratacao_inicial' ? 'selected' : ''}>Contratação inicial (50%)</option>
+          <option value="contratacao_final" ${presets.tipoCobranca === 'contratacao_final' ? 'selected' : ''}>Contratação final (50%)</option>
+        </select>
+        <div class="view-desc" id="chTipoCobrancaNote" style="margin-top:4px;"></div>
+      </div>
+
+      <div class="field">
         <label class="field-label">Descrição</label>
         <input class="input" id="chDescricao" placeholder="Ex: Mensalidade de agosto" required value="${presets.descricao ? escapeHtml(presets.descricao) : ''}">
       </div>
@@ -2632,7 +2628,7 @@ function openChargeModal(presets, onSaved) {
         </div>
       </div>
 
-      <div class="field" id="chRecRow" style="${modoAvulso ? 'display:none;' : ''}">
+      <div class="field" id="chRecRow" style="display:none;">
         <label style="display:flex; align-items:center; gap:8px; font-size:14px; cursor:pointer;">
           <input type="checkbox" id="chRecorrente">
           <span>🔁 Repetir todo mês</span>
@@ -2687,21 +2683,30 @@ function openChargeModal(presets, onSaved) {
     </form>
   `);
 
+  const TIPO_COBRANCA_NOTAS = {
+    unica: 'Cobrança de uma vez só. A mensagem sai sem o aviso de bloqueio do sistema.',
+    mensalidade: 'Cobra só este mês, sem repetir. A mensagem leva o aviso de bloqueio do sistema.',
+    mensalidade_recorrente: 'As próximas cobranças serão lançadas sozinhas todo mês, com este valor e no mesmo dia do vencimento, a partir do mês que vem. A mensagem leva o aviso de bloqueio do sistema.',
+    contratacao_inicial: 'Parcela única da contratação. A mensagem sai sem o aviso de bloqueio do sistema.',
+    contratacao_final: 'Parcela única da contratação. A mensagem sai sem o aviso de bloqueio do sistema.'
+  };
+  const DESC_AUTO_TIPO = { contratacao_inicial: 'Contratação inicial (50%)', contratacao_final: 'Contratação final (50%)' };
+
+  // O tipo escolhido manda em tudo: liga/desliga a recorrência e define a mensagem.
   function atualizarRecorrenciaUI() {
-    const row = qs('#chRecRow');
-    if (!row) return;
+    const sel = qs('#chTipoCobranca'), box = qs('#chRecorrente');
+    if (!sel || !box) return;
     const avulso = temClientes ? qs('#chTipo').value === 'avulso' : true;
-    const box = qs('#chRecorrente');
-    if (avulso) { row.style.display = 'none'; box.checked = false; return; }
-    row.style.display = '';
-    const cli = clientById(qs('#chCliente').value);
-    if (cli && cli.recorrente) {
-      box.checked = false; box.disabled = true;
-      qs('#chRecNote').textContent = `Este cliente já tem mensalidade automática (${formatCurrency(cli.valorPlano)}, vence todo dia ${diaVencimentoValido(cli.diaVencimento)}).`;
-    } else {
-      box.disabled = false;
-      qs('#chRecNote').textContent = 'As próximas cobranças serão lançadas sozinhas todo mês, com este valor e no mesmo dia do vencimento, a partir do mês que vem.';
-    }
+    const cli = avulso ? null : clientById(qs('#chCliente').value);
+    const jaRecorrente = !!(cli && cli.recorrente);
+    const optRec = sel.querySelector('option[value="mensalidade_recorrente"]');
+    optRec.disabled = avulso || jaRecorrente;
+    if (optRec.disabled && sel.value === 'mensalidade_recorrente') sel.value = 'mensalidade';
+    box.checked = sel.value === 'mensalidade_recorrente';
+    let nota = TIPO_COBRANCA_NOTAS[sel.value] || '';
+    if (jaRecorrente) nota = `Este cliente já tem mensalidade automática (${formatCurrency(cli.valorPlano)}, vence todo dia ${diaVencimentoValido(cli.diaVencimento)}), então "recorrente" fica indisponível. ` + nota;
+    else if (avulso) nota = 'Venda avulsa não tem mensalidade recorrente. ' + nota;
+    qs('#chTipoCobrancaNote').textContent = nota;
   }
 
   function atualizarHintPlano() {
@@ -2721,7 +2726,7 @@ function openChargeModal(presets, onSaved) {
       hintEl.innerHTML = '';
     }
   }
-  if (!modoAvulso) atualizarHintPlano();
+  if (!modoAvulso) atualizarHintPlano(); else atualizarRecorrenciaUI();
   if (temClientes && !modoAvulso) qs('#chCliente').onchange = atualizarHintPlano;
 
   if (temClientes) {
@@ -2737,6 +2742,15 @@ function openChargeModal(presets, onSaved) {
   }
 
   qs('#btnCancelCharge').onclick = closeModal;
+
+  qs('#chTipoCobranca').onchange = () => {
+    const v = qs('#chTipoCobranca').value;
+    const d = qs('#chDescricao'), autos = Object.values(DESC_AUTO_TIPO);
+    if (DESC_AUTO_TIPO[v] && (!d.value.trim() || autos.includes(d.value.trim()))) d.value = DESC_AUTO_TIPO[v];
+    else if (!DESC_AUTO_TIPO[v] && autos.includes(d.value.trim())) d.value = '';
+    atualizarRecorrenciaUI();
+  };
+  if (presets.tipoCobranca && DESC_AUTO_TIPO[presets.tipoCobranca] && !qs('#chDescricao').value) qs('#chDescricao').value = DESC_AUTO_TIPO[presets.tipoCobranca];
 
   qs('#chPagCartao').onchange = () => {
     qs('#chCartaoLinkRow').classList.toggle('hidden', !qs('#chPagCartao').checked);
@@ -2816,6 +2830,7 @@ function openChargeModal(presets, onSaved) {
       createdAt: todayISO(),
       ...(presets.tipo ? { tipo: presets.tipo } : {}),
       ...recExtra,
+      tipoCobranca: qs('#chTipoCobranca').value,
       formasPagamento,
       linkPagamentoCartao: cartaoLink || null,
       boletoLink: boletoLink || null,
@@ -2825,6 +2840,622 @@ function openChargeModal(presets, onSaved) {
     closeModal();
     if (onSaved) onSaved(); else navigate(currentView);
   };
+}
+
+// ---------- RECORRÊNCIAS (acompanhamento das mensalidades automáticas) ----------
+let _recFiltro = { busca: '', filtro: 'todos', mes: '', carteira: 'todos' };
+
+function mesAnteriorISO(mes) {
+  let [a, m] = mes.split('-').map(Number);
+  m--; if (m < 1) { m = 12; a--; }
+  return `${a}-${String(m).padStart(2, '0')}`;
+}
+// Cobrança de mensalidade recorrente de um cliente em determinado mês (AAAA-MM).
+// Procura a mensalidade do cliente naquele mês, mesmo que tenha sido lançada à mão
+// (sem a marca de "recorrente") ou sem competência (aí vale o mês do vencimento).
+// Se houver mais de uma (ex.: uma paga e uma duplicada em aberto), vale a paga.
+function cobMensalidadeNoMes(lista, clienteId, mes) {
+  const achadas = lista.filter(ch => ch.clientId === clienteId && (
+    ch.id === `rec-${clienteId}-${mes}` ||
+    (cobrancaEhMensalidade(ch) && (ch.competencia === mes || (!ch.competencia && String(ch.vencimento || '').startsWith(mes))))));
+  return achadas.find(ch => ch.isenta) || achadas.find(ch => ch.status === 'pago') || achadas[0] || null;
+}
+function recCobrancaDoMes(clienteId, mes) {
+  return cobMensalidadeNoMes(getCharges(), clienteId, mes);
+}
+// sem | isenta | pago | pendente | atrasado
+function recStatus(cob) {
+  if (!cob) return 'sem';
+  if (cob.isenta) return 'isenta';
+  return chargeStatus(cob);
+}
+const REC_ROTULO = { sem: 'Sem cobrança', isenta: 'Isenta', pago: 'Paga', pendente: 'Pendente', atrasado: 'Atrasada' };
+const REC_CLASSE = { sem: 'stamp-pausado', isenta: 'stamp-pago', pago: 'stamp-pago', pendente: 'stamp-pendente', atrasado: 'stamp-atrasado' };
+const REC_ICONE = { sem: '▫️', isenta: '🎁', pago: '✅', pendente: '⏳', atrasado: '⚠️' };
+const REC_PRIORIDADE = { atrasado: 0, pendente: 1, sem: 2, pago: 3, isenta: 3 };
+const REC_FORMA_ROTULO = { pix: 'Pix', boleto: 'boleto', cartao: 'cartão' };
+
+// ---- apoio da tela de Recorrências ----
+function recMesExtenso(mes) {
+  const [a, m] = mes.split('-').map(Number);
+  return `${MESES_PT[m - 1]} de ${a}`;
+}
+function recMesCurto(mes) { return MESES_PT[Number(mes.split('-')[1]) - 1].slice(0, 3); }
+function recDiasAte(iso) {
+  return Math.round((new Date(iso + 'T00:00:00') - new Date(todayISO() + 'T00:00:00')) / 86400000);
+}
+// Frase curta em português claro explicando a situação do cliente no mês
+function recFrase(c, cob, st, mes, mesHoje) {
+  if (st === 'atrasado') {
+    const n = Math.max(1, -recDiasAte(cob.vencimento));
+    return `Venceu em ${formatDateBR(cob.vencimento)} · ${n} dia${n > 1 ? 's' : ''} de atraso`;
+  }
+  if (st === 'pendente') {
+    const d = recDiasAte(cob.vencimento);
+    if (d === 0) return 'Vence hoje';
+    if (d === 1) return `Vence amanhã (${formatDateBR(cob.vencimento)})`;
+    return `Vence em ${formatDateBR(cob.vencimento)} · faltam ${d} dias`;
+  }
+  if (st === 'pago') return cob.dataPagamento ? `Pago em ${formatDateBR(cob.dataPagamento)}` : 'Pago';
+  if (st === 'isenta') return cob ? 'Mês isento (ganhou por indicação)' : 'Mês isento programado: a cobrança sai com valor zero';
+  if (st === 'fora') return `Ainda não era recorrente neste mês (começa em ${competenciaLabel(c.recorrenciaInicio)})`;
+  if (mes > mesHoje) return 'Será lançada automaticamente quando o mês chegar';
+  return `A cobrança de ${competenciaLabel(mes)} ainda não foi lançada`;
+}
+
+const REC_GRUPOS = [
+  { st: ['atrasado'], titulo: '⚠️ Atrasadas', sub: 'venceram e ainda não foram pagas' },
+  { st: ['pendente'], titulo: '⏳ Pendentes', sub: 'dentro do prazo, esperando o pagamento' },
+  { st: ['sem'], titulo: '▫️ Sem cobrança lançada', sub: 'ainda não existe cobrança deste mês' },
+  { st: ['pago', 'isenta'], titulo: '✅ Pagas', sub: 'já recebidas (inclui meses isentos)' },
+  { st: ['fora'], titulo: 'Ainda não começaram', sub: 'o cliente só vira recorrente depois deste mês' }
+];
+
+// Registra que o cliente já pagou a mensalidade de um mês que ainda não tem cobrança
+// lançada: cria a cobrança já como paga (assim o sistema também não gera outra em aberto).
+function openRecPagoManualModal(clientId, mes) {
+  const cli = clientById(clientId);
+  if (!cli) return;
+  const opcoes = [['pix', 'PIX'], ['cartao_credito', 'Cartão de crédito'], ['cartao_debito', 'Cartão de débito'], ['boleto', 'Boleto bancário'], ['dinheiro', 'Dinheiro'], ['transferencia', 'Transferência bancária'], ['outro', 'Outro']];
+  openModal(`
+    <div class="modal-title">✅ ${escapeHtml(cli.nome)} já pagou — ${recMesExtenso(mes)}</div>
+    <p class="view-desc" style="margin:-8px 0 14px;">Registra a mensalidade deste mês como paga, pra ficar certo na tela de Recorrências e nos relatórios.</p>
+    <div class="field">
+      <label class="field-label">Valor pago (R$)</label>
+      <input class="input" type="number" min="0" step="0.01" id="rpValor" value="${Number(cli.valorPlano) || ''}">
+    </div>
+    <div class="field">
+      <label class="field-label">Forma de pagamento usada</label>
+      <select class="input" id="rpForma">${opcoes.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>
+    </div>
+    <div class="field">
+      <label class="field-label">Data do pagamento</label>
+      <input class="input" type="date" id="rpData" value="${todayISO()}">
+    </div>
+    <div class="field">
+      <label class="field-label">Link do comprovante (opcional)</label>
+      <input class="input" type="url" id="rpComp" placeholder="Print do comprovante no Drive/Fotos">
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" id="rpCancel">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="rpSalvar">Registrar pagamento</button>
+    </div>
+  `);
+  qs('#rpCancel').onclick = closeModal;
+  qs('#rpSalvar').onclick = () => {
+    const valor = Number(qs('#rpValor').value);
+    if (!(valor > 0)) { alert('Informe o valor pago.'); return; }
+    if (cobMensalidadeNoMes(getCharges(), cli.id, mes)) { alert('Esse mês já tem uma mensalidade lançada.'); closeModal(); navigate(currentView); return; }
+    let link = qs('#rpComp').value.trim();
+    if (link && !/^https?:\/\//i.test(link)) link = 'https://' + link;
+    const nova = {
+      id: `rec-${cli.id}-${mes}`, clientId: cli.id, avulsoNome: null, avulsoTelefone: null,
+      tipo: 'mensalidade', competencia: mes, recorrente: true,
+      vencimento: `${mes}-${String(diaVencimentoValido(cli.diaVencimento)).padStart(2, '0')}`,
+      createdAt: todayISO(), linkPagamentoCartao: null, boletoLink: null, boletoCodigo: null,
+      descricao: `Mensalidade ${competenciaLabel(mes)} — ${cli.plano || 'plano'}`,
+      valor, status: 'pago', dataPagamento: qs('#rpData').value || todayISO(),
+      comprovanteLink: link || null, formaPagamentoUsada: qs('#rpForma').value,
+      formasPagamento: formasDaRecorrencia(cli, getSettings())
+    };
+    saveCharges([...getCharges(), nova]);
+    const premiado = concederIsencaoPorIndicacao(nova);
+    closeModal();
+    if (premiado) alert(`🎁 ${premiado} ganhou 1 mensalidade isenta por essa indicação!`);
+    navigate(currentView);
+  };
+}
+
+function renderRecorrencias() {
+  const mesHoje = todayISO().slice(0, 7);
+  if (!_recFiltro.mes) _recFiltro.mes = mesHoje;
+  if (!['todos', 'atrasadas', 'pendentes', 'pagas', 'sem', 'falta', 'bloqueados'].includes(_recFiltro.filtro)) _recFiltro.filtro = 'todos';
+  const mes = _recFiltro.mes;
+  if (!['todos', 'pessoal', 'orvyn'].includes(_recFiltro.carteira)) _recFiltro.carteira = 'todos';
+  const recorrentes = getClients().filter(c => c.recorrente && (
+    _recFiltro.carteira === 'todos' ||
+    (_recFiltro.carteira === 'orvyn' ? c.origem === 'orvyn' : c.origem !== 'orvyn')
+  ));
+  const pl = (n, s, p) => (n === 1 ? s : p);
+
+  const cabecalho = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Recorrências</div>
+        <div class="view-desc">Mensalidades automáticas: veja quem já pagou e quem ainda falta, mês a mês</div>
+      </div>
+      <div class="rec-mes-nav">
+        <button class="btn btn-ghost btn-sm" id="recMesPrev" title="Mês anterior" aria-label="Mês anterior">‹</button>
+        <input class="input" type="month" id="recMes" value="${mes}" aria-label="Mês">
+        <button class="btn btn-ghost btn-sm" id="recMesNext" title="Próximo mês" aria-label="Próximo mês">›</button>
+        <button class="btn btn-primary" id="btnNovaCobrancaRec">+ Nova cobrança</button>
+      </div>
+    </div>
+    <div class="portfolio-switch rec-carteira-switch" aria-label="Carteira de recorrências">
+        <button type="button" data-rec-carteira="todos" class="${_recFiltro.carteira === 'todos' ? 'active' : ''}">Todas</button>
+        <button type="button" data-rec-carteira="pessoal" class="${_recFiltro.carteira === 'pessoal' ? 'active' : ''}">Pessoal</button>
+        <button type="button" data-rec-carteira="orvyn" class="${_recFiltro.carteira === 'orvyn' ? 'active' : ''}">ORVYN Studio</button>
+    </div>`;
+
+  if (recorrentes.length === 0) {
+    const carteiraVazia = _recFiltro.carteira === 'orvyn' ? ' da ORVYN' : _recFiltro.carteira === 'pessoal' ? ' pessoal' : '';
+    qs('#main').innerHTML = cabecalho + emptyState(`Nenhum cliente recorrente${carteiraVazia}`, 'Edite um cliente dessa carteira e marque "Lançar a mensalidade automaticamente todo mês" (com o valor do plano) para ele aparecer aqui.');
+    wireTopo();
+    return;
+  }
+
+  // fotografia do mês escolhido
+  const linhas = recorrentes.map(c => {
+    const cob = recCobrancaDoMes(c.id, mes);
+    let st = recStatus(cob);
+    if (st === 'sem' && c.recorrenciaInicio && mes < c.recorrenciaInicio) st = 'fora';
+    if (st === 'sem' && isencaoProgramadaDoMes(c, mes)) st = 'isenta';
+    const historico = [];
+    let m = mes;
+    for (let i = 0; i < 6; i++) {
+      historico.unshift({ mes: m, st: recStatus(recCobrancaDoMes(c.id, m)), antes: !!(c.recorrenciaInicio && m < c.recorrenciaInicio) });
+      m = mesAnteriorISO(m);
+    }
+    const valor = st === 'isenta' ? 0 : cob ? (Number(cob.valor) || 0) : (Number(c.valorPlano) || 0);
+    return { c, cob, st, historico, valor, falta: cob ? chargeFaltaDados(cob) : [] };
+  });
+
+  const soma = (sts) => linhas.filter(l => sts.includes(l.st)).reduce((s, l) => s + l.valor, 0);
+  const cont = (sts) => linhas.filter(l => sts.includes(l.st)).length;
+  const vPago = soma(['pago']), vPend = soma(['pendente']), vAtr = soma(['atrasado']), vSem = soma(['sem']);
+  const esperado = vPago + vPend + vAtr + vSem;
+  const pct = esperado > 0 ? Math.round((vPago / esperado) * 100) : 0;
+  const w = (v) => (esperado > 0 ? ((v / esperado) * 100).toFixed(2) : 0);
+  const nBloq = recorrentes.filter(c => c.bloqueio && c.bloqueio.ativo).length;
+  const nFalta = linhas.filter(l => l.falta.length && l.st !== 'pago').length;
+  const previstoCheio = recorrentes.reduce((s, c) => s + (Number(c.valorPlano) || 0), 0);
+
+  const tiles = [
+    { f: 'atrasadas', cls: 'atrasado', ico: '⚠️', nome: 'Atrasadas', n: cont(['atrasado']), v: vAtr, dica: 'venceram e não pagaram' },
+    { f: 'pendentes', cls: 'pendente', ico: '⏳', nome: 'Pendentes', n: cont(['pendente']), v: vPend, dica: 'ainda dentro do prazo' },
+    { f: 'sem', cls: 'sem', ico: '▫️', nome: 'Sem cobrança', n: cont(['sem']), v: vSem, dica: 'cobrança ainda não lançada' },
+    { f: 'pagas', cls: 'pago', ico: '✅', nome: 'Pagas', n: cont(['pago', 'isenta']), v: vPago, dica: 'já recebidas' }
+  ];
+
+  qs('#main').innerHTML = `
+    ${cabecalho}
+
+    <div class="rec-resumo">
+      <div class="rec-resumo-topo">
+        <div>
+          <div class="stat-label">${recMesExtenso(mes)}</div>
+          <div class="rec-resumo-frase">
+            Já entrou <strong class="emerald-txt">${formatCurrency(vPago)}</strong>
+            de <strong>${formatCurrency(esperado)}</strong> esperados
+          </div>
+        </div>
+        <div class="rec-pct">${pct}%</div>
+      </div>
+      <div class="rec-bar" role="img" aria-label="${pct}% recebido">
+        <span class="seg seg-pago" style="width:${w(vPago)}%"></span>
+        <span class="seg seg-pendente" style="width:${w(vPend)}%"></span>
+        <span class="seg seg-atrasado" style="width:${w(vAtr)}%"></span>
+        <span class="seg seg-sem" style="width:${w(vSem)}%"></span>
+      </div>
+      <div class="rec-legenda">
+        <span><i class="dot dot-pago"></i>Recebido</span>
+        <span><i class="dot dot-pendente"></i>Pendente</span>
+        <span><i class="dot dot-atrasado"></i>Atrasado</span>
+        <span><i class="dot dot-sem"></i>Falta lançar</span>
+      </div>
+      <div class="rec-resumo-rodape">
+        ${recorrentes.length} ${pl(recorrentes.length, 'cliente recorrente', 'clientes recorrentes')} · mensalidade cheia de todos: ${formatCurrency(previstoCheio)}/mês${nBloq ? ` · 🔒 ${nBloq} com sistema bloqueado` : ''}
+      </div>
+    </div>
+
+    <div class="rec-tiles">
+      ${tiles.map(t => `
+        <button type="button" class="rec-tile rec-tile-${t.cls}" data-rec-f="${t.f}">
+          <div class="rec-tile-nome">${t.ico} ${t.nome}</div>
+          <div class="rec-tile-n">${t.n}</div>
+          <div class="rec-tile-v">${formatCurrency(t.v)}</div>
+          <div class="rec-tile-dica">${t.dica}</div>
+        </button>`).join('')}
+    </div>
+
+    <div class="rec-filtros">
+      <input class="input" id="recBusca" placeholder="Buscar cliente..." value="${escapeHtml(_recFiltro.busca)}">
+      <button type="button" class="rec-chip" data-rec-f="todos">Todos (${linhas.length})</button>
+      ${nFalta ? `<button type="button" class="rec-chip" data-rec-f="falta">🧾 Falta boleto / link do cartão (${nFalta})</button>` : ''}
+      ${nBloq ? `<button type="button" class="rec-chip" data-rec-f="bloqueados">🔒 Sistema bloqueado (${nBloq})</button>` : ''}
+    </div>
+    <div id="recLista"></div>
+  `;
+
+  function wireTopo() {
+    qs('#recMes').onchange = (e) => { _recFiltro.mes = e.target.value || mesHoje; renderRecorrencias(); };
+    qs('#recMesPrev').onclick = () => { _recFiltro.mes = mesAnteriorISO(mes); renderRecorrencias(); };
+    qs('#recMesNext').onclick = () => { _recFiltro.mes = proximoMesISO(mes); renderRecorrencias(); };
+    qs('#btnNovaCobrancaRec').onclick = () => openChargeModal(undefined, () => renderRecorrencias());
+    qsa('[data-rec-carteira]').forEach(b => b.onclick = () => { _recFiltro.carteira = b.dataset.recCarteira; renderRecorrencias(); });
+  }
+  wireTopo();
+
+  function marcarAtivos() {
+    qsa('[data-rec-f]').forEach(b => b.classList.toggle('ativo', b.dataset.recF === _recFiltro.filtro));
+  }
+  qsa('[data-rec-f]').forEach(b => b.onclick = () => {
+    _recFiltro.filtro = (_recFiltro.filtro === b.dataset.recF) ? 'todos' : b.dataset.recF;
+    marcarAtivos();
+    pintar();
+  });
+
+  function cardCliente({ c, cob, st, historico, valor, falta }) {
+    const bloqueado = !!(c.bloqueio && c.bloqueio.ativo);
+    const aberta = !!cob && st !== 'pago' && st !== 'isenta';
+    const temTel = !!(c.telefone && onlyDigits(c.telefone).length >= 10);
+    const forma = REC_FORMA_ROTULO[formaRecorrenciaDoCliente(c)];
+    const nIsenc = Number(c.isencoesDisponiveis) || 0;
+    const rotulo = st === 'fora' ? 'Não começou' : REC_ROTULO[st];
+    const classeSelo = st === 'fora' ? 'stamp-pausado' : REC_CLASSE[st];
+    const hist = historico.map(h => {
+      const ico = (h.st === 'sem' && h.antes) ? '–' : REC_ICONE[h.st];
+      const tit = (h.st === 'sem' && h.antes) ? 'antes de começar' : REC_ROTULO[h.st];
+      return `<span class="rec-h${h.mes === mes ? ' atual' : ''}" title="${competenciaLabel(h.mes)}: ${tit}"><b>${recMesCurto(h.mes)}</b>${ico}</span>`;
+    }).join('');
+    const rotuloFalta = falta.length === 1 && falta[0] === 'boleto' ? 'boleto' : 'link do cartão';
+
+    return `
+      <div class="rec-card rec-${st}">
+        <div class="rec-card-topo">
+          <div class="rec-nome">
+            ${escapeHtml(c.nome)}
+            ${bloqueado ? '<span class="avulso-tag">🔒 bloqueado</span>' : ''}
+            ${nIsenc > 0 ? `<span class="avulso-tag">🎁 ${nIsenc} ${pl(nIsenc, 'isenção', 'isenções')}</span>` : ''}
+          </div>
+          <div class="rec-valor">${st === 'isenta' ? `<span class="rec-valor-isento">Isenta</span><small class="rec-valor-plano">plano ${formatCurrency(c.valorPlano)}</small>` : formatCurrency(valor)}</div>
+        </div>
+        <div class="rec-situacao">
+          <span class="stamp-badge ${classeSelo}">${rotulo}</span>
+          <span class="rec-frase">${recFrase(c, cob, st, mes, mesHoje)}</span>
+        </div>
+        ${aberta && falta.length ? `
+        <div class="rec-aviso">
+          <span>🧾 Falta anexar o ${rotuloFalta} deste mês.</span>
+          <button class="btn btn-ghost btn-sm" data-dados-charge="${cob.id}">Anexar ${rotuloFalta}</button>
+        </div>` : ''}
+        <div class="rec-meta">
+          <span><em>Carteira</em> <select class="input rec-wallet-select" data-rec-wallet-client="${escapeHtml(c.id)}" aria-label="Carteira de ${escapeHtml(c.nome)}">
+            <option value="pessoal" ${(c.origem || 'pessoal') !== 'orvyn' ? 'selected' : ''}>Pessoal</option>
+            <option value="orvyn" ${c.origem === 'orvyn' ? 'selected' : ''}>ORVYN Studio</option>
+          </select></span>
+          <span><em>Plano</em> ${escapeHtml(c.plano || '—')}</span>
+          <span><em>Vencimento</em> todo dia ${diaVencimentoValido(c.diaVencimento)}</span>
+          <span><em>Paga via</em> ${forma}</span>
+        </div>
+        <div class="rec-hist"><span class="rec-hist-tit">Últimos 6 meses</span>${hist}</div>
+        <div class="rec-acoes">
+          ${aberta && temTel ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${cob.id}">${cob.enviadaEm ? '✓ Cobrança enviada · reenviar' : 'Enviar cobrança'}</button>` : ''}
+          ${aberta ? `<button class="btn btn-primary btn-sm" data-pay-charge="${cob.id}">Marcar como pago</button>` : ''}
+          ${st === 'sem' ? `<button class="btn btn-primary btn-sm" data-rec-pago-manual="${c.id}">✅ Cliente já pagou</button>` : ''}
+          ${st === 'pago' && temTel ? `<button class="btn btn-whatsapp btn-sm" data-send-recibo="${cob.id}">📲 Enviar recibo</button>` : ''}
+          ${st === 'isenta' && cob && temTel ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${cob.id}">${cob.enviadaEm ? '✓ Enviada · reenviar' : 'Enviar mensalidade (isenta)'}</button>` : ''}
+          ${st === 'isenta' && !cob && temTel ? `<button class="btn btn-whatsapp btn-sm" data-aviso-isencao="${c.id}" data-aviso-mes="${mes}">📲 Avisar que vai ficar isenta</button>` : ''}
+          <span class="rec-acoes-sec">
+            <button class="btn btn-ghost btn-sm" data-view-client="${c.id}">Ver cliente</button>
+            <button class="btn btn-ghost btn-sm" data-edit-rec="${c.id}">Editar</button>
+            <button class="btn btn-ghost btn-sm" data-pausar-rec="${c.id}">Pausar</button>
+          </span>
+        </div>
+      </div>`;
+  }
+
+  function pintar() {
+    const termo = _recFiltro.busca.trim().toLowerCase();
+    let lista = linhas.filter(l => !termo || String(l.c.nome).toLowerCase().includes(termo));
+    const f = _recFiltro.filtro;
+    if (f === 'atrasadas') lista = lista.filter(l => l.st === 'atrasado');
+    else if (f === 'pendentes') lista = lista.filter(l => l.st === 'pendente');
+    else if (f === 'pagas') lista = lista.filter(l => l.st === 'pago' || l.st === 'isenta');
+    else if (f === 'sem') lista = lista.filter(l => l.st === 'sem');
+    else if (f === 'falta') lista = lista.filter(l => l.falta.length && l.st !== 'pago');
+    else if (f === 'bloqueados') lista = lista.filter(l => l.c.bloqueio && l.c.bloqueio.ativo);
+    const porNome = (a, b) => String(a.c.nome).localeCompare(String(b.c.nome));
+
+    if (lista.length === 0) {
+      qs('#recLista').innerHTML = emptyState('Nenhum cliente aqui', 'Nada encontrado com esse filtro.');
+    } else {
+      qs('#recLista').innerHTML = REC_GRUPOS.map(g => {
+        const itens = lista.filter(l => g.st.includes(l.st)).sort(porNome);
+        if (!itens.length) return '';
+        return `
+          <section class="rec-grupo">
+            <div class="rec-grupo-titulo">${g.titulo} <span class="rec-grupo-n">${itens.length}</span><small>${g.sub}</small></div>
+            ${itens.map(cardCliente).join('')}
+          </section>`;
+      }).join('');
+    }
+
+    bindChargeActions();
+    qsa('[data-aviso-isencao]').forEach(b => b.onclick = () => openIsencaoWhatsappModal(b.dataset.avisoIsencao, b.dataset.avisoMes));
+    qsa('[data-rec-pago-manual]').forEach(b => b.onclick = () => openRecPagoManualModal(b.dataset.recPagoManual, mes));
+    qsa('[data-view-client]').forEach(b => b.onclick = () => renderClienteDetalhe(b.dataset.viewClient));
+    qsa('[data-edit-rec]').forEach(b => b.onclick = () => openClientModal(b.dataset.editRec, () => renderRecorrencias()));
+    qsa('[data-pausar-rec]').forEach(b => b.onclick = () => {
+      const c = clientById(b.dataset.pausarRec);
+      if (!c || !confirm(`Pausar o lançamento automático da mensalidade de ${c.nome}? As cobranças já lançadas continuam. Pra voltar, é só marcar de novo na edição do cliente.`)) return;
+      saveClients(getClients().map(x => x.id === c.id ? { ...x, recorrente: false } : x));
+      renderRecorrencias();
+    });
+    qsa('[data-rec-wallet-client]').forEach(select => select.onchange = () => {
+      const id = select.dataset.recWalletClient;
+      const origem = select.value === 'orvyn' ? 'orvyn' : 'pessoal';
+      saveClients(getClients().map(c => c.id === id ? { ...c, origem } : c));
+      renderRecorrencias();
+    });
+  }
+
+  qs('#recBusca').oninput = (e) => { _recFiltro.busca = e.target.value; pintar(); };
+  marcarAtivos();
+  pintar();
+}
+
+
+// ---------- INDICAÇÕES: isenção programada por mês ----------
+function isencaoProgramadaDoMes(c, mes) {
+  return (c.isencoesProgramadas || []).find(p => p.mes === mes && !p.aplicadaEm) || null;
+}
+
+// Cadastra "este cliente ganha a mensalidade isenta no mês X".
+// Se a cobrança desse mês ainda não existe, o gerador automático lança já como isenta.
+// Se já existe e está em aberto, troca agora por isenta (valor zero).
+function programarIsencao({ clientId, mes, indicado, usarSaldo }) {
+  const cli = clientById(clientId);
+  if (!cli) return false;
+  if ((cli.isencoesProgramadas || []).some(p => p.mes === mes)) {
+    alert(`${cli.nome} já tem uma isenção cadastrada para ${recMesExtenso(mes)}.`);
+    return false;
+  }
+  const cob = recCobrancaDoMes(cli.id, mes);
+  let aplicadaEm = null;
+  if (cob) {
+    if (cob.isenta) {
+      aplicadaEm = todayISO();
+    } else if (cob.status === 'pago') {
+      alert(`A mensalidade de ${recMesExtenso(mes)} de ${cli.nome} já foi paga (${formatCurrency(cob.valor)}), então não dá pra isentar esse mês. Escolha outro mês.`);
+      return false;
+    } else {
+      if (!confirm(`A mensalidade de ${recMesExtenso(mes)} de ${cli.nome} já foi lançada (${formatCurrency(cob.valor)}). Trocar agora por uma mensalidade isenta (valor zero)?`)) return false;
+      saveCharges(getCharges().map(c => c.id !== cob.id ? c : {
+        ...c, valorOriginal: Number(c.valor), valor: 0, status: 'pago', dataPagamento: todayISO(), isenta: true, formasPagamento: [],
+        descricao: String(c.descricao || '') + ' (isenta por indicação)'
+      }));
+      aplicadaEm = todayISO();
+    }
+  }
+  const saldo = Number(cli.isencoesDisponiveis) || 0;
+  const gasta = !!usarSaldo && saldo > 0;
+  saveClients(getClients().map(c => c.id !== cli.id ? c : {
+    ...c,
+    isencoesProgramadas: [...(c.isencoesProgramadas || []), {
+      id: 'isp-' + Date.now().toString(36), mes, indicado: indicado || '', criadoEm: todayISO(), aplicadaEm, usouSaldo: gasta
+    }],
+    ...(gasta ? { isencoesDisponiveis: saldo - 1 } : { isencoesGanhas: (Number(c.isencoesGanhas) || 0) + 1 }),
+    ...(aplicadaEm ? { isencoesUsadas: (Number(c.isencoesUsadas) || 0) + 1 } : {})
+  }));
+  return true;
+}
+
+function cancelarIsencaoProgramada(clientId, progId) {
+  const cli = clientById(clientId);
+  const p = cli && (cli.isencoesProgramadas || []).find(x => x.id === progId);
+  if (!p) return;
+  const cob = p.aplicadaEm ? recCobrancaDoMes(cli.id, p.mes) : null;
+  const reverter = !!(cob && cob.isenta);
+  const msg = reverter
+    ? `A mensalidade de ${recMesExtenso(p.mes)} de ${cli.nome} já foi lançada como isenta. Cancelar vai voltá-la para cobrança normal de ${formatCurrency(cob.valorOriginal || cli.valorPlano)}. Continuar?`
+    : `Cancelar a isenção de ${recMesExtenso(p.mes)} de ${cli.nome}? A mensalidade desse mês será cobrada normalmente.`;
+  if (!confirm(msg)) return;
+  if (reverter) {
+    const settings = getSettings();
+    saveCharges(getCharges().map(c => {
+      if (c.id !== cob.id) return c;
+      const { valorOriginal, ...rest } = c;
+      return {
+        ...rest, valor: Number(valorOriginal) || Number(cli.valorPlano) || 0, status: 'pendente', dataPagamento: null, isenta: false,
+        descricao: String(c.descricao || '').replace(/ \(isenta[^)]*\)$/, ''), formasPagamento: formasDaRecorrencia(cli, settings)
+      };
+    }));
+  }
+  saveClients(getClients().map(c => c.id !== cli.id ? c : {
+    ...c,
+    isencoesProgramadas: (c.isencoesProgramadas || []).filter(x => x.id !== progId),
+    ...(!p.aplicadaEm && p.usouSaldo ? { isencoesDisponiveis: (Number(c.isencoesDisponiveis) || 0) + 1 } : {}),
+    ...(p.aplicadaEm ? { isencoesUsadas: Math.max(0, (Number(c.isencoesUsadas) || 0) - 1) } : {})
+  }));
+  renderIndicacoes();
+}
+
+function openIsencaoProgramadaModal(pre) {
+  pre = pre || {};
+  const recs = getClients().filter(c => c.recorrente).sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
+  if (!recs.length) { alert('Nenhum cliente com mensalidade automática. Edite um cliente e marque "Lançar a mensalidade automaticamente todo mês".'); return; }
+  const mesPadrao = pre.mes || proximoMesISO(todayISO().slice(0, 7));
+  const nomes = getClients().map(c => c.nome);
+  openModal(`
+    <div class="modal-title">🎁 Cadastrar mensalidade isenta</div>
+    <div class="field">
+      <label class="field-label">Cliente</label>
+      <select class="input" id="ipCliente">
+        ${recs.map(c => `<option value="${c.id}" ${pre.clientId === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field">
+      <label class="field-label">Em qual mês ela fica isenta?</label>
+      <input class="input" type="month" id="ipMes" value="${mesPadrao}">
+      <div class="view-desc" style="margin-top:4px;" id="ipMesDica"></div>
+    </div>
+    <div class="field">
+      <label class="field-label">Quem ela indicou (opcional)</label>
+      <input class="input" id="ipIndicado" list="ipNomes" placeholder="Nome de quem foi indicado" value="${escapeHtml(pre.indicado || '')}">
+      <datalist id="ipNomes">${nomes.map(n => `<option value="${escapeHtml(n)}"></option>`).join('')}</datalist>
+    </div>
+    <label id="ipSaldoRow" class="hidden" style="display:flex; gap:8px; align-items:flex-start; font-size:13px; margin-bottom:12px;">
+      <input type="checkbox" id="ipSaldo" checked style="margin-top:3px;">
+      <span>Essa cliente já ganhou <b id="ipSaldoN">1</b> isenção automática. Usar ela neste mês (recomendado — evita isentar dois meses).</span>
+    </label>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-ghost" id="ipCancel">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="ipSalvar">Cadastrar isenção</button>
+    </div>
+  `);
+  function atualizar() {
+    const cli = clientById(qs('#ipCliente').value);
+    const saldo = cli ? (Number(cli.isencoesDisponiveis) || 0) : 0;
+    qs('#ipSaldoRow').classList.toggle('hidden', saldo < 1);
+    qs('#ipSaldoRow').style.display = saldo < 1 ? 'none' : 'flex';
+    qs('#ipSaldoN').textContent = saldo;
+    const mes = qs('#ipMes').value;
+    const cob = cli && mes ? recCobrancaDoMes(cli.id, mes) : null;
+    qs('#ipMesDica').textContent = !mes ? '' :
+      cob ? (cob.isenta ? 'Esse mês já está isento.' : cob.status === 'pago' ? '⚠️ Esse mês já foi pago — escolha outro.' : 'Esse mês já foi cobrado: ao salvar, a cobrança em aberto vira isenta.')
+          : `A mensalidade de ${recMesExtenso(mes)} vai sair isenta, sem cobrança, quando o sistema a lançar.`;
+  }
+  qs('#ipCliente').onchange = atualizar;
+  qs('#ipMes').onchange = atualizar;
+  atualizar();
+  qs('#ipCancel').onclick = closeModal;
+  qs('#ipSalvar').onclick = () => {
+    const clientId = qs('#ipCliente').value, mes = qs('#ipMes').value;
+    if (!clientId || !mes) { alert('Escolha o cliente e o mês.'); return; }
+    const ok = programarIsencao({ clientId, mes, indicado: qs('#ipIndicado').value.trim(), usarSaldo: qs('#ipSaldo').checked && !qs('#ipSaldoRow').classList.contains('hidden') });
+    if (!ok) return;
+    closeModal();
+    navigate(currentView === 'recorrencias' ? 'recorrencias' : 'indicacoes');
+  };
+}
+
+function renderIndicacoes() {
+  const clients = getClients();
+  const progs = [];
+  clients.forEach(c => (c.isencoesProgramadas || []).forEach(p => progs.push({ c, p })));
+  progs.sort((a, b) => a.p.mes.localeCompare(b.p.mes) || String(a.c.nome).localeCompare(String(b.c.nome)));
+  const programadas = progs.filter(x => !x.p.aplicadaEm);
+  const aplicadas = progs.filter(x => x.p.aplicadaEm).reverse();
+  const comSaldo = clients.filter(c => (Number(c.isencoesDisponiveis) || 0) > 0);
+  const indicados = clients.filter(c => c.indicadoPor && clientById(c.indicadoPor));
+  const pl = (n, s, p) => (n === 1 ? s : p);
+
+  const cardProg = ({ c, p }) => {
+    const aplicada = !!p.aplicadaEm;
+    const temTel = !!(c.telefone && onlyDigits(c.telefone).length >= 10);
+    const avisada = c.isencaoAvisada && c.isencaoAvisada.mes === p.mes;
+    const cobIsenta = aplicada ? recCobrancaDoMes(c.id, p.mes) : null;
+    return `
+      <div class="ind-card ${aplicada ? 'ind-feito' : 'ind-isento'}">
+        <div class="ind-card-topo">
+          <div class="ind-nome">${escapeHtml(c.nome)} <span class="ind-seta">·</span> ${recMesExtenso(p.mes)}</div>
+          <span class="stamp-badge ${aplicada ? 'stamp-pausado' : 'stamp-pago'}">${aplicada ? '✓ Aplicada' : '🎁 Programada'}</span>
+        </div>
+        <div class="ind-quando">${aplicada
+          ? `A mensalidade de <b>${recMesExtenso(p.mes)}</b> já foi lançada como isenta (valor zero).`
+          : `A mensalidade de <b>${recMesExtenso(p.mes)}</b> vai sair <b>isenta</b>: o sistema lança sozinho no início do mês, sem cobrar.`}</div>
+        ${p.indicado ? `<div class="ind-meta"><em>Ganhou por indicar</em> ${escapeHtml(p.indicado)}</div>` : ''}
+        <div class="ind-acoes">
+          ${temTel && cobIsenta ? `<button class="btn btn-whatsapp btn-sm" data-send-charge="${cobIsenta.id}">${cobIsenta.enviadaEm ? '✓ Enviada · reenviar' : '📲 Enviar mensalidade (isenta)'}</button>`
+            : temTel ? `<button class="btn btn-whatsapp btn-sm" data-aviso-isencao="${c.id}" data-aviso-mes="${p.mes}">📲 ${avisada ? 'Gerar mensagem de novo' : 'Gerar mensagem de aviso'}</button>`
+                   : `<span class="view-desc" style="margin:0;">Sem WhatsApp cadastrado.</span>`}
+          ${avisada ? `<span class="ind-ok">✓ Aviso enviado em ${formatDateBR(c.isencaoAvisada.em)}</span>` : ''}
+          <span class="rec-acoes-sec">
+            <button class="btn btn-ghost btn-sm" data-view-client="${c.id}">Ver cliente</button>
+            <button class="btn btn-ghost btn-sm" data-ind-cancel="${c.id}" data-ind-prog="${p.id}">Cancelar isenção</button>
+          </span>
+        </div>
+      </div>`;
+  };
+
+  const cardSaldo = (c) => {
+    const n = Number(c.isencoesDisponiveis) || 0;
+    return `
+      <div class="ind-card">
+        <div class="ind-card-topo">
+          <div class="ind-nome">${escapeHtml(c.nome)}</div>
+          <span class="stamp-badge stamp-pendente">${n} ${pl(n, 'isenção', 'isenções')} sem mês</span>
+        </div>
+        <div class="ind-quando">Ganhou automaticamente e será usada na <b>próxima mensalidade</b> lançada. Se quiser outro mês, escolha aqui.</div>
+        <div class="ind-acoes">
+          <button class="btn btn-primary btn-sm" data-ind-nova-cli="${c.id}">Escolher o mês</button>
+          <button class="btn btn-ghost btn-sm" data-view-client="${c.id}">Ver cliente</button>
+        </div>
+      </div>`;
+  };
+
+  const cardIndicado = (c) => {
+    const indicador = clientById(c.indicadoPor);
+    const passos = [
+      { ok: true, txt: 'Indicado cadastrado' },
+      { ok: !!c.indicacaoPremiada, txt: 'Pagou a 1ª mensalidade' },
+      { ok: !!c.indicacaoPremiada, txt: `${escapeHtml(primeiroNome(indicador.nome))} ganhou 1 isenção` }
+    ];
+    return `
+      <div class="ind-card">
+        <div class="ind-card-topo">
+          <div class="ind-nome">${escapeHtml(c.nome)} <span class="ind-seta">indicado por</span> ${escapeHtml(indicador.nome)}</div>
+          <span class="stamp-badge ${c.indicacaoPremiada ? 'stamp-pago' : 'stamp-pendente'}">${c.indicacaoPremiada ? '🎁 Premiada' : 'Aguardando'}</span>
+        </div>
+        <div class="ind-passos">${passos.map(p => `<span class="ind-passo ${p.ok ? 'feito' : ''}">${p.ok ? '✅' : '⏳'} ${p.txt}</span>`).join('')}</div>
+        <div class="ind-acoes">
+          <button class="btn btn-ghost btn-sm" data-ind-nova-cli="${indicador.id}" data-ind-indicado="${escapeHtml(c.nome)}">🎁 Cadastrar isenção pra ${escapeHtml(primeiroNome(indicador.nome))}</button>
+        </div>
+      </div>`;
+  };
+
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div>
+        <div class="view-title">Indicações</div>
+        <div class="view-desc">Cadastre em qual mês cada cliente ganha a mensalidade isenta. O sistema respeita o mês escolhido ao lançar a cobrança.</div>
+      </div>
+      <button class="btn btn-primary" id="btnNovaIsencao">+ Cadastrar isenção</button>
+    </div>
+
+    <div class="ind-secao-titulo">Isenções programadas <span class="rec-grupo-n">${programadas.length}</span><small>vão sair isentas no mês indicado</small></div>
+    ${programadas.length ? programadas.map(cardProg).join('') : `<div class="ind-vazio">Nenhuma isenção programada. Clique em <b>+ Cadastrar isenção</b>, escolha a cliente e o mês (ex.: Dezembro).</div>`}
+
+    ${comSaldo.length ? `
+      <div class="ind-secao-titulo" style="margin-top:24px;">Ganharam isenção, sem mês definido <span class="rec-grupo-n">${comSaldo.length}</span><small>serão usadas na próxima mensalidade</small></div>
+      ${comSaldo.map(cardSaldo).join('')}` : ''}
+
+    ${aplicadas.length ? `
+      <div class="ind-secao-titulo" style="margin-top:24px;">Já aplicadas <span class="rec-grupo-n">${aplicadas.length}</span><small>meses que já saíram isentos</small></div>
+      ${aplicadas.map(cardProg).join('')}` : ''}
+
+    <div class="ind-secao-titulo" style="margin-top:24px;">Indicações registradas <span class="rec-grupo-n">${indicados.length}</span><small>quem indicou quem (cadastro do cliente → "Indicado por")</small></div>
+    ${indicados.length ? indicados.map(cardIndicado).join('') : `<div class="ind-vazio">Nenhuma indicação registrada no cadastro de clientes.</div>`}
+    <div style="height:30px;"></div>
+  `;
+
+  qs('#btnNovaIsencao').onclick = () => openIsencaoProgramadaModal();
+  qsa('[data-ind-nova-cli]').forEach(b => b.onclick = () => openIsencaoProgramadaModal({ clientId: b.dataset.indNovaCli, indicado: b.dataset.indIndicado || '' }));
+  qsa('[data-ind-cancel]').forEach(b => b.onclick = () => cancelarIsencaoProgramada(b.dataset.indCancel, b.dataset.indProg));
+  qsa('[data-aviso-isencao]').forEach(b => b.onclick = () => openIsencaoWhatsappModal(b.dataset.avisoIsencao, b.dataset.avisoMes));
+  qsa('[data-send-charge]').forEach(b => b.onclick = () => openWhatsappModal(b.dataset.sendCharge));
+  qsa('[data-view-client]').forEach(b => b.onclick = () => renderClienteDetalhe(b.dataset.viewClient));
 }
 
 // ---------- AGENDA / REUNIÕES ----------
@@ -3099,7 +3730,7 @@ function openMeetingModal(meetingId, presetClientId, onSaved) {
 // obs: WhatsApp usa *asterisco* pra deixar o texto em negrito
 // Aviso de bloqueio + rodapé de mensagem automática (entram nas mensagens de cobrança)
 const AVISO_BLOQUEIO_TEXTO =
-`⚠️ *Importante:* caso o pagamento não seja identificado até o dia do vencimento, o sistema é *automaticamente bloqueado*, sendo liberado somente após a identificação do pagamento.`;
+`⚠️ Sem o pagamento identificado até o vencimento, o sistema é *bloqueado* e só é liberado após a identificação.`;
 
 function emitidaEmLabel(d) {
   d = d || new Date();
@@ -3129,11 +3760,49 @@ function clienteUsaSistema(client) {
 }
 
 const MODELO_COBRANCA_PADRAO =
-`Prezado cliente, segue em anexo a sua cobrança ({descricao}) com vencimento para o dia *{vencimento_data}*.
+`{primeiro_nome}, segue em anexo a cobrança ({descricao}) com vencimento em *{vencimento_data}*.
 
-{divisao}Acesse o arquivo acima para ter acesso às demais informações e realize o pagamento até o dia do vencimento.
+{divisao}Os dados para pagamento estão no arquivo.
 
 {aviso_bloqueio}
+
+{rodape_automatico}`;
+
+// Cobrança paga SÓ no cartão: vai só a mensagem (texto com o link), sem PDF.
+// Duas variações: mensalidade (pode bloquear o sistema) e contratação/parcela (não tem como bloquear).
+// O tipo escolhido ao lançar a cobrança ("Tipo da cobrança") manda na mensagem:
+//   mensalidade / mensalidade_recorrente -> mensagem de mensalidade (com aviso de bloqueio)
+//   unica / contratacao_inicial / contratacao_final -> sem aviso de bloqueio
+// Cobranças antigas (ou lançadas sozinhas todo mês) não têm esse campo: valem recorrente / tipo 'mensalidade'.
+const TIPOS_COBRANCA_ROTULO = {
+  unica: 'Cobrança única',
+  mensalidade: 'Mensalidade',
+  mensalidade_recorrente: 'Mensalidade recorrente',
+  contratacao_inicial: 'Contratação inicial',
+  contratacao_final: 'Contratação final'
+};
+function cobrancaEhMensalidade(charge) {
+  if (!charge) return false;
+  if (charge.tipoCobranca) return charge.tipoCobranca === 'mensalidade' || charge.tipoCobranca === 'mensalidade_recorrente';
+  return !!(charge.recorrente || charge.tipo === 'mensalidade');
+}
+
+function cobrancaSoCartao(charge) {
+  const f = (charge && charge.formasPagamento) || [];
+  return f.includes('cartao') && !f.includes('pix') && !f.includes('boleto');
+}
+
+const MODELO_CARTAO_MENSALIDADE =
+`{primeiro_nome}, sua mensalidade ({descricao}) de {valor} vence em *{vencimento_data}*.
+{divisao}{pagamento}
+
+{aviso_bloqueio}
+
+{rodape_automatico}`;
+
+const MODELO_CARTAO_CONTRATACAO =
+`{primeiro_nome}, pagamento de {descricao}: {valor}, com vencimento em *{vencimento_data}*.
+{divisao}{pagamento}
 
 {rodape_automatico}`;
 
@@ -3151,9 +3820,9 @@ function pixChaveRotulo(chave) {
 }
 
 const MODELO_RECORRENTE_PADRAO =
-`Prezado cliente, segue em anexo a sua mensalidade com vencimento para o dia *{vencimento_data}*.
+`{primeiro_nome}, segue em anexo a mensalidade com vencimento em *{vencimento_data}*.
 
-{divisao}Acesse o arquivo acima para ter acesso às demais informações e realize o pagamento até o dia do vencimento.
+{divisao}Os dados para pagamento estão no arquivo.
 
 {aviso_bloqueio}
 
@@ -3162,11 +3831,13 @@ const MODELO_RECORRENTE_PADRAO =
 // Modelos salvos antes desta versão (com a "montoeira" de avisos) são ignorados
 // em favor do novo padrão enxuto; ao salvar de novo, vale o que a pessoa escrever.
 const MODELO_VERSAO = 4;
+// Modelos salvos com a saudação antiga ("Prezado cliente, segue..." / "Olá, nome!") passam a começar direto pelo primeiro nome.
+function saudacaoComNome(t) { return String(t).replace(/Prezado cliente,\s+segue/g, '{primeiro_nome}, segue').replace(/Olá, \{primeiro_nome\}! Segue/g, '{primeiro_nome}, segue'); }
 function modeloCobrancaAtual(s) {
-  return (s.modeloVersao === MODELO_VERSAO && s.modeloCobranca) ? s.modeloCobranca : MODELO_COBRANCA_PADRAO;
+  return (s.modeloVersao === MODELO_VERSAO && s.modeloCobranca) ? saudacaoComNome(s.modeloCobranca) : MODELO_COBRANCA_PADRAO;
 }
 function modeloRecorrenteAtual(s) {
-  return (s.modeloVersao === MODELO_VERSAO && s.modeloCobrancaRecorrente) ? s.modeloCobrancaRecorrente : MODELO_RECORRENTE_PADRAO;
+  return (s.modeloVersao === MODELO_VERSAO && s.modeloCobrancaRecorrente) ? saudacaoComNome(s.modeloCobrancaRecorrente) : MODELO_RECORRENTE_PADRAO;
 }
 
 function buildLinhasPagamento(charge, settings) {
@@ -3211,6 +3882,7 @@ function montarVariaveisMensagemCobranca(charge, client, settings) {
   const pagamento = buildLinhasPagamento(charge, settings);
   return {
     nome: client.nome,
+    primeiro_nome: primeiroNome(client.nome) || 'cliente',
     quem_fala: quemFala,
     descricao: charge.descricao,
     valor: `*${formatCurrency(charge.valor)}*`,
@@ -3221,22 +3893,45 @@ function montarVariaveisMensagemCobranca(charge, client, settings) {
     competencia: charge.competencia ? competenciaLabel(charge.competencia) : String(charge.vencimento || '').slice(5, 7) + '/' + String(charge.vencimento || '').slice(0, 4),
     plano: (client && client.plano) || '',
     divisao: linhaDivisaoCobranca(charge, client),
-    aviso_bloqueio: AVISO_BLOQUEIO_TEXTO,
+    // Bloqueio só existe em mensalidade; contratação inicial/final não tem como desativar o sistema.
+    aviso_bloqueio: cobrancaEhMensalidade(charge) ? AVISO_BLOQUEIO_TEXTO : '',
     rodape_automatico: rodapeAutomaticoTexto()
   };
 }
 
+// Mensalidade recorrente que saiu isenta: mesma mensagem de sempre da mensalidade
+// (vai com o PDF em anexo), mas com o valor definido como isento e sem dados de pagamento.
+function buildMensagemMensalidadeIsenta(charge, client) {
+  const comp = charge.competencia ? recMesExtenso(charge.competencia) : '';
+  const prog = (client.isencoesProgramadas || []).find(p => p.mes === charge.competencia);
+  const indicados = prog && prog.indicado
+    ? [primeiroNome(prog.indicado)]
+    : getClients().filter(x => x.indicadoPor === client.id && x.indicacaoPremiada).map(x => primeiroNome(x.nome));
+  const porQuem = indicados.length ? ` pela indicação de ${indicados.join(' e ')}` : ' pela sua indicação';
+  const planoValor = Number(charge.valorOriginal) || Number(client.valorPlano) || 0;
+  return `${nomeCurto(client)}, segue em anexo a mensalidade${comp ? ' de *' + comp + '*' : ''} com vencimento em *${formatDateBR(charge.vencimento)}*.` +
+    `\n\nEla está *isenta* neste mês${planoValor > 0 ? ` (valor do plano: ${formatCurrency(planoValor)})` : ''}, como agradecimento${porQuem}. 🎁 *Não há nada a pagar.*` +
+    `\n\n${rodapeAutomaticoTexto()}`;
+}
+
 function buildMessage(charge, client) {
+  if (charge && charge.isenta) return buildMensagemMensalidadeIsenta(charge, client);
   const settings = getSettings();
-  // Cliente de mensalidade recorrente tem texto próprio (Configurações → Mensagem de mensalidade)
-  let modelo = clienteEhRecorrente(charge, client) ? modeloRecorrenteAtual(settings) : modeloCobrancaAtual(settings);
-  if (!modelo.includes('{divisao}')) {
-    modelo = /\{valor\}.*\n/.test(modelo)
-      ? modelo.replace(/(\{valor\}.*\n)/, '$1{divisao}')
-      : modelo + '\n\n{divisao}';
+  const ehMensalidade = cobrancaEhMensalidade(charge);
+  let modelo;
+  if (cobrancaSoCartao(charge)) {
+    modelo = ehMensalidade ? MODELO_CARTAO_MENSALIDADE : MODELO_CARTAO_CONTRATACAO;
+  } else {
+    // Cliente de mensalidade recorrente tem texto próprio (Configurações → Mensagem de mensalidade)
+    modelo = ehMensalidade ? modeloRecorrenteAtual(settings) : modeloCobrancaAtual(settings);
+    if (!modelo.includes('{divisao}')) {
+      modelo = /\{valor\}.*\n/.test(modelo)
+        ? modelo.replace(/(\{valor\}.*\n)/, '$1{divisao}')
+        : modelo + '\n\n{divisao}';
+    }
+    if (ehMensalidade && !modelo.includes('{aviso_bloqueio}')) modelo += '\n\n{aviso_bloqueio}';
+    if (!modelo.includes('{rodape_automatico}')) modelo += '\n\n{rodape_automatico}';
   }
-  if (!modelo.includes('{aviso_bloqueio}')) modelo += '\n\n{aviso_bloqueio}';
-  if (!modelo.includes('{rodape_automatico}')) modelo += '\n\n{rodape_automatico}';
   // Linhas vazias (ex.: sem aviso de bloqueio) não deixam buraco na mensagem.
   return renderTemplate(modelo, montarVariaveisMensagemCobranca(charge, client, settings))
     .replace(/\n{3,}/g, '\n\n').trim();
@@ -3258,7 +3953,7 @@ function openWhatsappModal(chargeId) {
   if (charge.enviadaEm && !confirm(`Esta cobrança já foi enviada em ${dataHoraBR(charge.enviadaEm)}. A cobrança é feita uma vez só — enviar de novo mesmo assim?`)) return;
   const falta = chargeFaltaDados(charge);
   if (falta.length && !confirm(`Essa cobrança ainda está sem ${falta.map(k => FALTA_LABEL[k]).join(' e ')}. Enviar assim mesmo?\n\n(Cancelar = voltar e anexar primeiro, no botão da cobrança.)`)) return;
-  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client), () => marcarCobrancaEnviada(chargeId), { pdf: () => gerarCobrancaPDF(chargeId) });
+  openSendWhatsappModal(`Enviar cobrança — ${client.nome}`, client, buildMessage(charge, client), () => marcarCobrancaEnviada(chargeId), cobrancaSoCartao(charge) ? {} : { pdf: () => gerarCobrancaPDF(chargeId) });
 }
 
 function buildMeetingMessage(meeting, client) {
@@ -3287,6 +3982,93 @@ function buildBirthdayMessage(client) {
     `\n\n${rodapeAutomaticoTexto()}`;
 }
 
+// ---------- RECIBO, BLOQUEIO E LIBERAÇÃO ----------
+function nomeCurto(client) { return primeiroNome(client && client.nome) || 'Cliente'; }
+
+function buildReciboMessage(charge, client) {
+  return `${nomeCurto(client)}, pagamento de ${formatCurrency(charge.valor)} (${charge.descricao || 'cobrança'}) identificado. Segue o recibo em anexo.` +
+    `\n\n${rodapeAutomaticoTexto()}`;
+}
+
+function buildBloqueioMessage(client) {
+  const pend = cobrancaNaoIdentificada(client);
+  const motivo = pend
+    ? ` por falta de identificação do pagamento (${pend.descricao || 'cobrança'}, venceu em ${formatDateBR(pend.vencimento)}, ${formatCurrency(pend.valor)})`
+    : ' por falta de identificação do pagamento';
+  return `${nomeCurto(client)}, o sistema foi *bloqueado*${motivo}.` +
+    `\n\nAssim que o pagamento for identificado, a liberação é feita em até 48h. Se já pagou, envie o comprovante por aqui.` +
+    `\n\n${rodapeAutomaticoTexto()}`;
+}
+
+function buildLiberacaoMessage(client) {
+  return `${nomeCurto(client)}, pagamento identificado. O sistema foi *liberado*.` +
+    `\n\n${rodapeAutomaticoTexto()}`;
+}
+
+// ---------- AVISO DE MENSALIDADE ISENTA (indicação) ----------
+// Mês em que a próxima isenção do cliente vai ser usada: se já existe uma
+// mensalidade isenta lançada que ainda não foi avisada, é ela; senão, é a próxima
+// mensalidade recorrente que o sistema vai lançar.
+function isencaoMesAlvo(c) {
+  const mesHoje = todayISO().slice(0, 7);
+  const ja = getCharges()
+    .filter(ch => ch.clientId === c.id && ch.isenta && ch.competencia)
+    .sort((a, b) => b.competencia.localeCompare(a.competencia))[0];
+  if (ja && ja.competencia >= mesHoje) return { mes: ja.competencia, lancada: true, charge: ja };
+  const prog = (c.isencoesProgramadas || []).filter(p => !p.aplicadaEm).sort((a, b) => a.mes.localeCompare(b.mes))[0];
+  if (prog) return { mes: prog.mes, lancada: false, programada: true, charge: null };
+  if ((Number(c.isencoesDisponiveis) || 0) > 0) {
+    let mes = c.recorrenciaUltimoMes ? proximoMesISO(c.recorrenciaUltimoMes) : (c.recorrenciaInicio || mesHoje);
+    if (mes < mesHoje) mes = mesHoje;
+    return { mes, lancada: false, charge: null };
+  }
+  return null;
+}
+
+function buildIsencaoMessage(client, mes) {
+  const progMes = (client.isencoesProgramadas || []).find(p => p.mes === mes);
+  const indicados = progMes && progMes.indicado
+    ? [primeiroNome(progMes.indicado)]
+    : getClients().filter(x => x.indicadoPor === client.id && x.indicacaoPremiada).map(x => primeiroNome(x.nome));
+  const porQuem = indicados.length ? ` pela indicação de ${indicados.join(' e ')}` : ' pela sua indicação';
+  const valor = Number(client.valorPlano) > 0 ? ` (${formatCurrency(client.valorPlano)})` : '';
+  const proximo = proximoMesISO(mes);
+  return `${nomeCurto(client)}, uma boa notícia! 🎉` +
+    `\n\nComo agradecimento${porQuem}, a sua mensalidade de *${recMesExtenso(mes)}*${valor} está *isenta*. Você não precisa pagar nada neste mês.` +
+    `\n\nA cobrança volta ao normal em *${recMesExtenso(proximo)}*. Obrigado pela confiança!` +
+    `\n\n${rodapeAutomaticoTexto()}`;
+}
+
+function openIsencaoWhatsappModal(clientId, mes) {
+  const cli = clientById(clientId);
+  if (!cli) return;
+  if (!cli.telefone) { alert(`${cli.nome} não tem WhatsApp cadastrado pra receber o aviso.`); return; }
+  const alvo = mes || (isencaoMesAlvo(cli) || {}).mes || todayISO().slice(0, 7);
+  openSendWhatsappModal(`Avisar mensalidade isenta — ${cli.nome}`, cli, buildIsencaoMessage(cli, alvo), () => {
+    saveClients(getClients().map(x => x.id === cli.id ? { ...x, isencaoAvisada: { mes: alvo, em: todayISO() } } : x));
+    navigate(currentView);
+  });
+}
+
+function openReciboWhatsappModal(chargeId) {
+  const charge = getCharges().find(c => c.id === chargeId);
+  if (!charge) return;
+  const client = charge.clientId ? clientById(charge.clientId) : { nome: charge.avulsoNome, telefone: charge.avulsoTelefone };
+  if (!client || !client.telefone) { alert('Essa cobrança não tem um WhatsApp válido pra enviar o recibo.'); return; }
+  openSendWhatsappModal(`Enviar recibo — ${client.nome}`, client, buildReciboMessage(charge, client), null,
+    { pdf: () => montarReciboPDF(chargeId), pdfLabel: 'Arquivo PDF do recibo' });
+}
+
+// tipo: 'bloqueio' | 'liberacao'
+function openAvisoSistemaWhatsappModal(clientId, tipo) {
+  const cli = clientById(clientId);
+  if (!cli) return;
+  if (!cli.telefone) { alert(`${cli.nome} não tem WhatsApp cadastrado pra receber o aviso.`); return; }
+  const bloqueio = tipo === 'bloqueio';
+  openSendWhatsappModal(`${bloqueio ? 'Avisar bloqueio' : 'Avisar liberação'} — ${cli.nome}`, cli,
+    bloqueio ? buildBloqueioMessage(cli) : buildLiberacaoMessage(cli));
+}
+
 function openMeetingWhatsappModal(meetingId) {
   const meeting = getMeetings().find(m => m.id === meetingId);
   const client = meeting.clientId ? clientById(meeting.clientId) : null;
@@ -3303,7 +4085,7 @@ function openSendWhatsappModal(title, client, defaultMsg, onSent, opts) {
   const temPdf = typeof opts.pdf === 'function';
   openModal(`
     <div class="modal-title">${escapeHtml(title)}</div>
-    ${temPdf ? `<div class="field"><label class="field-label">Arquivo PDF da cobrança</label><div class="view-desc" id="waPdfStatus" style="margin:0;">Gerando o PDF…</div></div>` : ''}
+    ${temPdf ? `<div class="field"><label class="field-label">${escapeHtml(opts.pdfLabel || 'Arquivo PDF da cobrança')}</label><div class="view-desc" id="waPdfStatus" style="margin:0;">Gerando o PDF…</div></div>` : ''}
     <div class="field">
       <label class="field-label">Mensagem (pode editar antes de enviar)</label>
       <textarea class="input" id="waMsg" style="min-height:170px;">${escapeHtml(defaultMsg)}</textarea>
@@ -4038,30 +4820,10 @@ function renderBlocosRecorrenciaEIndicacao() {
       </div>`}`;
 
   const indicados = clients.filter(c => c.indicadoPor && clientById(c.indicadoPor));
-  const premiadas = indicados.filter(c => c.indicacaoPremiada).length;
   const blocoInd = `
-    <div class="section-title">🎁 Indicações (${indicados.length})</div>
-    <p class="view-desc" style="margin-bottom:12px;">
-      Quando o cliente indicado paga a <b>1ª mensalidade</b>, quem indicou ganha <b>1 mensalidade isenta</b>.
-      ${indicados.length ? `${premiadas} já premiada(s), ${indicados.length - premiadas} aguardando.` : 'Pra registrar, escolha "Indicado por" no cadastro do cliente indicado.'}
-    </p>
-    ${indicados.length === 0 ? '' : `
-      <div class="ledger" style="margin-bottom:30px;">
-        ${indicados.map(c => {
-          const indicador = clientById(c.indicadoPor);
-          return `
-          <div class="ledger-row">
-            <div class="ledger-main">
-              <div class="ledger-title">${escapeHtml(c.nome)} <span class="avulso-tag">indicado por ${escapeHtml(indicador.nome)}</span></div>
-              <div class="ledger-sub">${c.indicacaoPremiada ? 'Isenção concedida em ' + formatDateBR(c.indicacaoPremiadaEm) : 'Aguardando o pagamento da 1ª mensalidade'}</div>
-            </div>
-            <span class="stamp-badge ${c.indicacaoPremiada ? 'stamp-pago' : 'stamp-pendente'}">${c.indicacaoPremiada ? '🎁 Premiada' : 'Aguardando'}</span>
-            <div class="ledger-actions">
-              <button class="btn btn-ghost btn-sm" data-view-client="${c.id}">Ver</button>
-            </div>
-          </div>`;
-        }).join('')}
-      </div>`}`;
+    <div class="section-title">🎁 Indicações</div>
+    <p class="view-desc" style="margin-bottom:14px;">As indicações agora têm uma tela própria, onde você cadastra em qual mês cada cliente ganha a mensalidade isenta e gera a mensagem de aviso.</p>
+    <button class="btn btn-primary" data-go-indicacoes>Abrir a tela de Indicações</button>`;
 
   return { rec: blocoRec, ind: blocoInd, nRec: recorrentes.length, nInd: indicados.length };
 }
@@ -4139,6 +4901,7 @@ function renderTabMensalidades() {
   qsa('.subtab-btn').forEach(b => b.onclick = () => { _mensSubtab = b.dataset.subtab; renderServicos(); });
   const btnNovaMensalidade = qs('#btnNovaMensalidade');
   if (btnNovaMensalidade) btnNovaMensalidade.onclick = () => openMensalidadeModal();
+  qsa('[data-go-indicacoes]').forEach(b => b.onclick = () => navigate('indicacoes'));
   qsa('[data-view-client]').forEach(b => b.onclick = () => renderClienteDetalhe(b.dataset.viewClient));
   qsa('[data-pausar-recorrencia]').forEach(b => b.onclick = () => {
     const c = clientById(b.dataset.pausarRecorrencia);
@@ -4255,6 +5018,19 @@ const CATEGORIAS_SAIDA = [
 ];
 let _saidasPeriodo = null; // 'AAAA-MM' (sempre um mês específico)
 
+function financeWalletSwitch(ativa) {
+  return `<div class="portfolio-switch finance-wallet-switch" aria-label="Carteira financeira">
+    <button type="button" data-finance-wallet="pessoal" class="${ativa === 'pessoal' ? 'active' : ''}">Meu financeiro</button>
+    <button type="button" data-finance-wallet="orvyn" class="${ativa === 'orvyn' ? 'active' : ''}">ORVYN Studio</button>
+  </div>`;
+}
+function wireFinanceWalletSwitch() {
+  qsa('[data-finance-wallet]').forEach(b => b.onclick = () => {
+    if (b.dataset.financeWallet === 'orvyn') navigate('orvyn', { orvynSubpage: 'finance' });
+    else navigate('saidas');
+  });
+}
+
 function hojeLocalISO() { return todayISO(); }
 function mesAnteriorISO(mes) {
   let [a, m] = mes.split('-').map(Number);
@@ -4265,11 +5041,30 @@ function mesAnteriorISO(mes) {
 // cobranças pagas dentro do mês (pela data em que o dinheiro entrou)
 function recebidosDoMes(mes) {
   return getCharges()
-    .filter(c => c.status === 'pago' && !c.isenta && (c.dataPagamento || '').slice(0, 7) === mes)
+    .filter(c => c.status === 'pago' && !c.isenta && (c.dataPagamento || '').slice(0, 7) === mes && (!c.clientId || clientById(c.clientId)?.origem !== 'orvyn'))
     .sort((a, b) => (b.dataPagamento || '').localeCompare(a.dataPagamento || ''));
 }
 function totalRecebidoPeriodo(mes) {
   return recebidosDoMes(mes).reduce((s, c) => s + Number(c.valor || 0), 0);
+}
+
+function renderFinanceiroHub() {
+  qs('#main').innerHTML = `
+    <div class="view-header">
+      <div><div class="view-title">Financeiro</div><div class="view-desc">Escolha qual carteira quer consultar. Os valores ficam dentro de cada área.</div></div>
+    </div>
+    <div class="finance-hub-grid">
+      <button type="button" class="finance-hub-card" id="abrirFinanceiroPessoal">
+        <span class="finance-hub-icon">◉</span><strong>Meu financeiro</strong>
+        <span>Entradas e saídas da carteira pessoal</span><i>Abrir carteira <b>→</b></i>
+      </button>
+      <button type="button" class="finance-hub-card finance-hub-orvyn" id="abrirFinanceiroOrvyn">
+        <span class="finance-hub-icon">O</span><strong>ORVYN Studio</strong>
+        <span>Recebimentos, despesas e repasses da agência</span><i>Abrir carteira <b>→</b></i>
+      </button>
+    </div>`;
+  qs('#abrirFinanceiroPessoal').onclick = () => navigate('saidas');
+  qs('#abrirFinanceiroOrvyn').onclick = () => navigate('orvyn', { orvynSubpage: 'finance' });
 }
 
 function renderSaidas() {
@@ -4301,6 +5096,8 @@ function renderSaidas() {
       </div>
       <button class="btn btn-primary" id="btnNovaSaida">+ Nova saída</button>
     </div>
+
+    ${financeWalletSwitch('pessoal')}
 
     <div class="periodo-nav">
       <button class="btn btn-ghost btn-sm" id="perAnt" aria-label="Mês anterior">‹</button>
@@ -4381,6 +5178,7 @@ function renderSaidas() {
       </div>`}
   `;
 
+  wireFinanceWalletSwitch();
   qs('#btnNovaSaida').onclick = () => openSaidaModal();
   qs('#perAnt').onclick = () => { _saidasPeriodo = mesAnteriorISO(periodo); renderSaidas(); };
   qs('#perProx').onclick = () => { _saidasPeriodo = proximoMesISO(periodo); renderSaidas(); };
@@ -4499,20 +5297,38 @@ function formatarDuracao(ms) {
 // tempo gasto = do início do atendimento até a conclusão (se nunca foi iniciado, conta da abertura)
 function ticketTempoGastoMs(t) {
   if (!t.concluidoEm) return null;
+  if (t.tempoManualMs != null && Number(t.tempoManualMs) > 0) return Number(t.tempoManualMs); // ajuste manual
   return new Date(t.concluidoEm) - new Date(t.iniciadoEm || t.abertoEm);
+}
+// tempo calculado sozinho (ignora o ajuste manual) — usado de referência no formulário
+function ticketTempoAutoMs(t) {
+  return (t.concluidoEm ? new Date(t.concluidoEm) : new Date()) - new Date(t.iniciadoEm || t.abertoEm);
+}
+function diasUteisEntre(inicio, fim) {
+  const d = new Date(inicio); d.setHours(0, 0, 0, 0);
+  const f = new Date(fim); f.setHours(0, 0, 0, 0);
+  let n = 0;
+  while (d < f) { d.setDate(d.getDate() + 1); if (d.getDay() !== 0 && d.getDay() !== 6) n++; }
+  return n;
+}
+function primeiroNome(nome) {
+  const p = String(nome || '').trim().split(/\s+/)[0] || '';
+  return p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase() : '';
 }
 function ticketAtrasado(t) { return t.status !== 'concluido' && t.prazoEm && new Date(t.prazoEm) < new Date(); }
 function ticketDataISO(iso) { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
 
 function ticketMensagemCliente(t, evento) {
+  const cliTk = getClients().find(c => c.id === t.clienteId);
+  const trat = cliTk && primeiroNome(cliTk.nome) ? `Prezado(a) *${primeiroNome(cliTk.nome)}*` : 'Prezado cliente';
   const cab = {
-    aberto: `Prezado cliente, recebemos a sua solicitação e abrimos o ticket *${t.numero}*. 📩`,
-    em_andamento: `Prezado cliente, o ticket *${t.numero}* entrou em *andamento*. 🛠️ Nossa equipe já começou a trabalhar na sua solicitação.`,
-    concluido: `Prezado cliente, o ticket *${t.numero}* foi *concluído*. ✅`
+    aberto: `${trat}, recebemos a sua solicitação e abrimos o ticket *${t.numero}*. 📩`,
+    em_andamento: `${trat}, o ticket *${t.numero}* entrou em *andamento*. 🛠️ Nossa equipe já começou a trabalhar na sua solicitação.`,
+    concluido: `${trat}, o ticket *${t.numero}* foi *concluído*. ✅`
   }[evento];
   let msg = `${cab}\n\n📌 *Assunto:* ${t.titulo}\n🏷️ *Tipo:* ${TICKET_TIPOS_TEXTO[ticketTipo(t)]}`;
   if (evento === 'aberto') msg += `\n⚡ *Prioridade:* ${TICKET_PRIORIDADES[t.prioridade] || ''}`;
-  if (evento !== 'concluido') msg += `\n📅 *Prazo para conclusão:* até ${formatDateBR(ticketDataISO(t.prazoEm))} (até ${TICKET_PRAZO_DIAS_UTEIS} dias úteis)`;
+  if (evento !== 'concluido') msg += `\n📅 *Prazo para conclusão:* até ${formatDateBR(ticketDataISO(t.prazoEm))} ${(() => { const du = diasUteisEntre(t.abertoEm, t.prazoEm); return du > 0 ? ` (até ${du} ${du === 1 ? 'dia útil' : 'dias úteis'})` : ''; })()}`;
   if (evento === 'concluido') msg += `\n⏱️ *Tempo gasto:* ${formatarDuracao(ticketTempoGastoMs(t))}`;
   if (evento === 'concluido' && ticketTipo(t) === 'melhoria') msg += `\n\n📄 Segue em anexo o relatório com os ajustes realizados, para a sua ciência. Acesse o arquivo acima para ver os detalhes.`;
   msg += evento === 'concluido'
@@ -4796,6 +5612,127 @@ function renderTicketsDocumentacao() {
   if (qs('#docBusca')) { qs('#docBusca').addEventListener('input', filtrar); qs('#docTipo').onchange = filtrar; }
 }
 
+// ---------- RESUMO RÁPIDO → TICKET (interpretador por regras, sem IA/servidor) ----------
+// Lê um texto solto (ou com linhas "Cliente: ...", "Assunto: ...") e devolve os
+// campos do ticket que conseguiu deduzir. Tudo é conferido por você antes de salvar.
+const TK_PALAVRAS_TIPO = {
+  bug: ['erro', 'bug', 'bugado', 'nao funciona', 'nao esta funcionando', 'nao ta funcionando', 'parou de funcionar', 'parou', 'quebrou', 'quebrado', 'travando', 'trava', 'travou', 'falha', 'falhando', 'nao abre', 'nao carrega', 'nao aparece', 'nao consegue', 'nao consigo', 'fora do ar', 'problema', 'bugou', 'sumiu', 'nao envia', 'nao salva'],
+  melhoria: ['adicionar', 'adiciona', 'incluir', 'inclui', 'novo ', 'nova ', 'melhorar', 'melhoria', 'criar', 'implementar', 'funcionalidade', 'gostaria', 'queria', 'quero', 'seria bom', 'seria legal', 'sugestao', 'integrar', 'integracao', 'nova pagina', 'novo botao', 'novo campo'],
+  manutencao: ['atualizar', 'atualizacao', 'trocar', 'alterar', 'mudar', 'ajustar', 'ajuste', 'renovar', 'dominio', 'hospedagem', 'backup', 'migrar', 'manutencao', 'remover', 'tirar', 'substituir', 'corrigir texto', 'trocar foto', 'trocar imagem', 'certificado', 'ssl']
+};
+const TK_PALAVRAS_PRIORIDADE = {
+  urgente: ['urgente', 'urgencia', 'emergencia', 'critico', 'imediato', 'imediatamente', 'fora do ar', 'parou tudo', 'agora mesmo', 'o mais rapido possivel', 'nao consigo vender', 'nao consegue vender', 'perdendo venda', 'perdendo vendas'],
+  alta: ['importante', 'prioridade', 'prioritario', 'o quanto antes', 'quanto antes', 'rapido', 'amanha', 'hoje', 'prejudicando', 'reclamando', 'reclamacao', 'cliente reclamou'],
+  baixa: ['sem pressa', 'quando puder', 'quando der', 'baixa prioridade', 'sem urgencia', 'nao e urgente', 'nao tem urgencia', 'com calma', 'sem correria']
+};
+
+function ticketInterpretarResumo(texto) {
+  const res = { avisos: [] };
+  const original = String(texto || '').trim();
+  if (!original) return res;
+
+  // 1) linhas rotuladas ("Cliente: Maria", "Assunto: ...")
+  const ROTULOS = {
+    cliente: 'cliente', assunto: 'titulo', titulo: 'titulo', tipo: 'tipo', prioridade: 'prioridade',
+    descricao: 'descricao', causa: 'docCausa', contexto: 'docCausa', arquivos: 'docArquivos', modulos: 'docArquivos',
+    cuidados: 'docObservacoes', observacao: 'docObservacoes', observacoes: 'docObservacoes', obs: 'docObservacoes',
+    feito: 'resumoTecnico', resumo: 'resumoTecnico', merge: 'merge', pr: 'merge', link: 'merge',
+    'tecnico': 'responsavelTecnico', 'responsavel': 'responsavelTecnico', dev: 'responsavelDev', desenvolvedor: 'responsavelDev'
+  };
+  const rot = {};
+  const livres = [];
+  original.split(/\r?\n/).forEach(linha => {
+    const m = linha.match(/^\s*([A-Za-zÀ-ÿ ]{2,20})\s*[:\-–]\s*(.+)$/);
+    const chave = m ? ROTULOS[semAcento(m[1]).trim()] : null;
+    if (chave) rot[chave] = (rot[chave] ? rot[chave] + '\n' : '') + m[2].trim();
+    else if (linha.trim()) livres.push(linha.trim());
+  });
+  const corpo = livres.join('\n');
+  const tudo = original;
+  const t = ' ' + semAcento(tudo).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ') + ' ';
+
+  // 2) cliente: rótulo ou melhor correspondência de nome na lista
+  const STOP = new Set(['da', 'de', 'do', 'das', 'dos', 'e', 'ltda', 'me', 'epp', 'eireli', 'the', 'cia', 'sa', 'loja', 'casa', 'studio']);
+  const alvoCliente = semAcento(rot.cliente || tudo).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ');
+  const alvoPalavras = new Set(alvoCliente.split(' ').filter(Boolean));
+  let melhor = null, melhorScore = 0, empate = false;
+  getClients().forEach(c => {
+    const nomeN = semAcento(c.nome).replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!nomeN) return;
+    let score = 0;
+    if ((' ' + alvoCliente + ' ').includes(' ' + nomeN + ' ')) score = 100 + nomeN.length; // nome completo
+    else {
+      const ps = nomeN.split(' ').filter(w => w.length >= 3 && !STOP.has(w));
+      score = ps.filter(w => alvoPalavras.has(w)).length;
+    }
+    if (score > melhorScore) { melhor = c; melhorScore = score; empate = false; }
+    else if (score === melhorScore && score > 0) empate = true;
+  });
+  if (melhor && !empate) res.clienteId = melhor.id;
+  else if (melhor && empate) res.avisos.push('Mais de um cliente combina com o texto — escolha o cliente manualmente.');
+  else res.avisos.push('Não achei o cliente no texto — escolha manualmente.');
+
+  // 3) tipo
+  const conta = (lista) => lista.reduce((n, w) => n + (t.includes(' ' + w.trim() + ' ') ? 1 : 0), 0); // palavra inteira, sem pegar pedaços
+  const tiposValidos = Object.keys(TICKET_TIPOS);
+  const tipoRot = rot.tipo ? tiposValidos.find(k => semAcento(rot.tipo).startsWith(semAcento(TICKET_TIPOS_TEXTO[k]).slice(0, 4))) : null;
+  if (tipoRot) res.tipo = tipoRot;
+  else {
+    const sc = { bug: conta(TK_PALAVRAS_TIPO.bug), melhoria: conta(TK_PALAVRAS_TIPO.melhoria), manutencao: conta(TK_PALAVRAS_TIPO.manutencao) };
+    const max = Math.max(sc.bug, sc.melhoria, sc.manutencao);
+    res.tipo = max === 0 ? 'manutencao' : (sc.bug === max ? 'bug' : sc.melhoria === max ? 'melhoria' : 'manutencao');
+    if (max === 0) res.avisos.push('Não ficou claro o tipo — deixei como Manutenção, confira.');
+  }
+
+  // 4) prioridade (negações como "sem pressa" / "não é urgente" vêm antes)
+  const prioRot = rot.prioridade ? Object.keys(TICKET_PRIORIDADES).find(k => semAcento(rot.prioridade).startsWith(semAcento(TICKET_PRIORIDADES[k]).slice(0, 4))) : null;
+  if (prioRot) res.prioridade = prioRot;
+  else if (conta(TK_PALAVRAS_PRIORIDADE.baixa) > 0) res.prioridade = 'baixa';
+  else if (conta(TK_PALAVRAS_PRIORIDADE.urgente) > 0) res.prioridade = 'urgente';
+  else if (conta(TK_PALAVRAS_PRIORIDADE.alta) > 0) res.prioridade = 'alta';
+  else res.prioridade = res.tipo === 'bug' ? 'alta' : 'media';
+
+  // 5) assunto e descrição
+  if (rot.titulo) res.titulo = rot.titulo;
+  else {
+    let frase = (corpo || tudo).split(/[\n.!?]/)[0].trim();
+    const limpa = frase.replace(/^(oi|ola|olá|bom dia|boa tarde|boa noite)[,!\s]*/i, '')
+      .replace(/^((o|a)\s+)?(cliente\s+)?[^,]{0,40}?\s+(falou|disse|pediu|avisou|mandou|informou|relatou|reclamou)\s+(que|pra|para)\s+/i, '')
+      .replace(/^((o|a)\s+)?(cliente\s+)?[^,]{0,40}?\s+(quer|precisa|gostaria de|deseja)\s+(de\s+|que\s+)?/i, '')
+      .replace(/[,;]?\s*(e|é|tá|ta|esta|está)?\s*(muito\s+)?(urgente|urgência|urgencia)\b[,.!]*/gi, '')
+      .replace(/[,;]?\s*(sem pressa|quando puder|quando der)\b[,.!]*/gi, '')
+      .replace(/\s{2,}/g, ' ').replace(/[,;\s]+$/, '').trim();
+    frase = limpa.length >= 8 ? limpa : frase;
+    if (frase.length > 80) frase = frase.slice(0, 80).replace(/\s+\S*$/, '') + '…';
+    res.titulo = frase ? frase.charAt(0).toUpperCase() + frase.slice(1) : '';
+  }
+  res.descricao = rot.descricao || corpo || (Object.keys(rot).length ? '' : tudo);
+
+  // 6) campos técnicos (só os que dá pra deduzir com segurança)
+  ['docCausa', 'docObservacoes', 'resumoTecnico', 'responsavelTecnico', 'responsavelDev'].forEach(k => { if (rot[k]) res[k] = rot[k]; });
+  const arquivos = rot.docArquivos || Array.from(new Set(tudo.match(/[\w./-]+\.(?:js|css|html|php|py|json|jsx|tsx|ts|vue|md)\b/gi) || [])).join(', ');
+  if (arquivos) res.docArquivos = arquivos;
+  const link = rot.merge || (tudo.match(/https?:\/\/(?:www\.)?(?:github|gitlab|bitbucket)\.com\/\S+/i) || [])[0];
+  if (link) { res.merge = link; if (res.descricao === link) res.descricao = ''; }
+  return res;
+}
+
+function ticketAplicarResumoNoForm(r) {
+  const set = (id, v) => { if (v !== undefined && v !== null && v !== '') qs(id).value = v; };
+  set('#tkCliente', r.clienteId);
+  if (r.tipo) { qs('#tkTipo').value = r.tipo; qs('#tkTipo').dispatchEvent(new Event('change')); }
+  set('#tkPrioridade', r.prioridade);
+  set('#tkTitulo', r.titulo);
+  set('#tkDescricao', r.descricao);
+  set('#tkResumo', r.resumoTecnico);
+  set('#tkDocCausa', r.docCausa);
+  set('#tkDocArquivos', r.docArquivos);
+  set('#tkDocObs', r.docObservacoes);
+  set('#tkMerge', r.merge);
+  set('#tkTecnico', r.responsavelTecnico);
+  set('#tkDev', r.responsavelDev);
+}
+
 function openTicketModal(id, opts) {
   opts = opts || {};
   const editing = id ? getTickets().find(t => t.id === id) : null;
@@ -4810,10 +5747,23 @@ function openTicketModal(id, opts) {
   ].filter(Boolean)));
   const statusInicial = opts.concluir ? 'concluido' : (editing ? editing.status : 'aberto');
   const numero = editing ? editing.numero : ticketProximoNumero();
+  const prazoISO = ticketDataISO(editing ? editing.prazoEm : addDiasUteis(new Date(), TICKET_PRAZO_DIAS_UTEIS).toISOString());
+  const tempoManualMin = editing && editing.tempoManualMs > 0 ? Math.round(editing.tempoManualMs / 60000) : null;
+  const tempoManualH = tempoManualMin != null ? Math.floor(tempoManualMin / 60) : '';
+  const tempoManualM = tempoManualMin != null ? tempoManualMin % 60 : '';
 
   openModal(`
     <div class="modal-title">${opts.concluir ? 'Concluir ' + escapeHtml(numero) : editing ? 'Editar ' + escapeHtml(numero) : 'Novo ticket'}</div>
     <form id="ticketForm">
+      ${editing ? '' : `
+      <div class="field" style="background:var(--paper-2, rgba(5,89,245,.06)); border:1px dashed var(--line, #9bb); border-radius:8px; padding:12px;">
+        <label class="field-label">⚡ Resumo rápido (opcional) — escreva do seu jeito que eu preencho o formulário</label>
+        <textarea class="input" id="tkResumoRapido" style="min-height:70px; font-family:inherit; font-size:14px;" placeholder="Ex.: A Maria da Padaria Sol falou que o botão de pagar não funciona no celular, tá urgente"></textarea>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;">
+          <button type="button" class="btn btn-ghost btn-sm" id="btnPreencherResumo">Preencher automaticamente</button>
+          <span class="view-desc" id="tkResumoRapidoMsg" style="margin:0;"></span>
+        </div>
+      </div>`}
       <div class="field-row">
         <div class="field">
           <label class="field-label">Nº do ticket</label>
@@ -4848,6 +5798,20 @@ function openTicketModal(id, opts) {
           <select class="input" id="tkStatus">
             ${Object.entries(TICKET_STATUS).map(([k, v]) => `<option value="${k}" ${statusInicial === k ? 'selected' : ''}>${v}</option>`).join('')}
           </select>
+        </div>` : ''}
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Prazo para conclusão (o cliente vê)</label>
+          <input type="date" class="input" id="tkPrazo" required value="${prazoISO}">
+        </div>
+        ${editing ? `<div class="field">
+          <label class="field-label">Tempo gasto — ajuste manual</label>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <input type="number" min="0" class="input" id="tkTempoH" value="${tempoManualH}" placeholder="0" style="width:45%;"> <span>h</span>
+            <input type="number" min="0" max="59" class="input" id="tkTempoM" value="${tempoManualM}" placeholder="0" style="width:45%;"> <span>min</span>
+          </div>
+          <div class="view-desc" style="margin:4px 0 0;">Vazio = automático (${formatarDuracao(ticketTempoAutoMs(editing))}${editing.concluidoEm ? '' : ' até agora'}). Só vale depois de concluído.</div>
         </div>` : ''}
       </div>
       <div class="field">
@@ -4905,6 +5869,21 @@ function openTicketModal(id, opts) {
   const syncTipo = () => qs('#tkResumoClienteField').classList.toggle('hidden', qs('#tkTipo').value !== 'melhoria');
   qs('#tkTipo').addEventListener('change', syncTipo);
   syncTipo();
+  if (!editing) {
+    qs('#btnPreencherResumo').onclick = () => {
+      const txt = qs('#tkResumoRapido').value;
+      const msg = qs('#tkResumoRapidoMsg');
+      if (!txt.trim()) { msg.textContent = 'Escreva um resumo primeiro.'; return; }
+      const r = ticketInterpretarResumo(txt);
+      ticketAplicarResumoNoForm(r);
+      const cli = r.clienteId ? getClients().find(c => c.id === r.clienteId) : null;
+      const partes = [];
+      if (cli) partes.push('cliente: ' + cli.nome);
+      partes.push('tipo: ' + TICKET_TIPOS_TEXTO[r.tipo]);
+      partes.push('prioridade: ' + TICKET_PRIORIDADES[r.prioridade]);
+      msg.textContent = 'Preenchido → ' + partes.join(' · ') + '. Confira os campos antes de abrir.' + (r.avisos.length ? ' ⚠️ ' + r.avisos.join(' ') : '');
+    };
+  }
   qs('#ticketForm').onsubmit = (e) => {
     e.preventDefault();
     const agora = new Date();
@@ -4921,7 +5900,9 @@ function openTicketModal(id, opts) {
       resumoCliente: qs('#tkResumoCliente').value.trim(),
       docCausa: qs('#tkDocCausa').value.trim(),
       docArquivos: qs('#tkDocArquivos').value.trim(),
-      docObservacoes: qs('#tkDocObs').value.trim()
+      docObservacoes: qs('#tkDocObs').value.trim(),
+      prazoEm: qs('#tkPrazo').value ? new Date(qs('#tkPrazo').value + 'T23:59:00').toISOString() : (editing ? editing.prazoEm : addDiasUteis(agora, TICKET_PRAZO_DIAS_UTEIS).toISOString()),
+      tempoManualMs: editing ? ((((parseInt(qs('#tkTempoH').value, 10) || 0) * 60) + (parseInt(qs('#tkTempoM').value, 10) || 0)) * 60000 || null) : null
     };
     if (!dados.titulo) return;
     const statusFinal = editing ? qs('#tkStatus').value : 'aberto';
@@ -5198,6 +6179,143 @@ function openNegociacaoModal(id) {
   };
 }
 
+// ---------- ORVYN STUDIO (ambiente de agência isolado dos dados pessoais) ----------
+function orvynTotals() {
+  const o = getOrvyn();
+  const recebido = o.payments.filter(x => x.status === 'recebido').reduce((s, x) => s + (Number(x.valor) || 0), 0);
+  const pendenteCliente = o.payments.filter(x => x.status !== 'recebido').reduce((s, x) => s + (Number(x.valor) || 0), 0);
+  const repassado = o.transfers.reduce((s, x) => s + (Number(x.valor) || 0), 0);
+  const despesas = o.expenses.reduce((s, x) => s + (Number(x.valor) || 0), 0);
+  const percentual = Number(o.settings?.partnerPercent) || 50;
+  const parteSocio = recebido * percentual / 100;
+  return { recebido, pendenteCliente, repassado, despesas, percentual, parteSocio, faltaRepassar: Math.max(0, parteSocio - repassado) };
+}
+
+let _orvynSubpage = 'home';
+
+function abrirClientesOrvyn() {
+  _clientesFiltro = { ..._clientesFiltro, busca: '', status: 'todos', ordem: 'nome', origem: 'orvyn' };
+  navigate('clientes');
+}
+
+function renderOrvyn() {
+  if (_orvynSubpage === 'finance') return renderOrvynFinance();
+
+  const nome = getNomeSaudacao();
+  qs('#main').innerHTML = `
+    <section class="orvyn-view orvyn-home">
+      <header class="orvyn-home-hero">
+        <img src="images/orvyn-logo.png" alt="ORVYN Studio">
+        <div class="orvyn-home-copy">
+          <span class="orvyn-eyebrow">ORVYN STUDIO</span>
+          <h1>${getGreeting()}${nome ? `, ${escapeHtml(nome)}` : ''}.</h1>
+          <p>Bem-vindo ao seu espaço de gestão. Escolha uma área para continuar.</p>
+        </div>
+      </header>
+      <div class="orvyn-home-grid">
+        <button class="orvyn-home-card" id="orvynAbrirFinanceiro">
+          <span class="orvyn-home-icon">↗</span><span class="orvyn-home-kicker">CONTROLE</span>
+          <strong>Financeiro do Studio</strong><span>Recebimentos, despesas e repasses</span>
+          <i>Entrar na área <b>→</b></i>
+        </button>
+        <button class="orvyn-home-card" id="orvynAbrirClientes">
+          <span class="orvyn-home-icon">◎</span><span class="orvyn-home-kicker">RELACIONAMENTO</span>
+          <strong>Clientes da agência</strong><span>Consulte e gerencie a carteira ORVYN</span>
+          <i>Entrar na área <b>→</b></i>
+        </button>
+        <button class="orvyn-home-card" id="orvynAbrirContratos">
+          <span class="orvyn-home-icon">▤</span><span class="orvyn-home-kicker">DOCUMENTOS</span>
+          <strong>Contratos</strong><span>Gere e acompanhe os contratos</span>
+          <i>Entrar na área <b>→</b></i>
+        </button>
+      </div>
+      <footer class="orvyn-footer"><span>ORVYN STUDIO</span><span>O mundo já viu o suficiente.</span></footer>
+    </section>`;
+
+  qs('#orvynAbrirFinanceiro').onclick = () => { _orvynSubpage = 'finance'; renderOrvyn(); };
+  qs('#orvynAbrirClientes').onclick = abrirClientesOrvyn;
+  qs('#orvynAbrirContratos').onclick = () => navigate('contratos', { origem: 'orvyn' });
+}
+
+function renderOrvynFinance() {
+  const o = getOrvyn();
+  const t = orvynTotals();
+  const main = qs('#main');
+  main.innerHTML = `
+    <section class="orvyn-view">
+      <button class="orvyn-btn orvyn-btn-light" id="orvynVoltarInicio" style="margin:0 0 12px;">← Início ORVYN</button>
+      ${financeWalletSwitch('orvyn')}
+      <header class="orvyn-hero">
+        <div class="orvyn-brand-lockup"><img class="orvyn-logo" src="images/orvyn-logo.png" alt="ORVYN — O mundo já viu o suficiente."></div>
+        <div class="orvyn-hero-copy"><span class="orvyn-eyebrow">FINANCEIRO · AGÊNCIA</span><h1>Studio</h1><p>Recebimentos, despesas e repasses da operação ORVYN.</p></div>
+        <div class="orvyn-share-pill"><strong>${t.percentual}%</strong><span>parte do sócio<br>sobre o recebido</span></div>
+      </header>
+
+      <div class="orvyn-section-head"><div><span class="orvyn-kicker">VISÃO GERAL</span><h2>Resumo financeiro</h2></div><div class="orvyn-quick-actions"><button class="orvyn-btn orvyn-btn-primary" id="orvynNovoRecebimento">+ Lançar recebimento</button></div></div>
+
+      <div class="orvyn-stats">
+        <article class="orvyn-stat"><span>Recebido dos clientes</span><strong>${formatCurrency(t.recebido)}</strong><small>${o.payments.filter(x => x.status === 'recebido').length} lançamentos confirmados</small></article>
+        <article class="orvyn-stat"><span>Parte do sócio · ${t.percentual}%</span><strong>${formatCurrency(t.parteSocio)}</strong><small>Calculada apenas sobre valores recebidos</small></article>
+        <article class="orvyn-stat"><span>Repasses registrados</span><strong>${formatCurrency(t.repassado)}</strong><small>Histórico de valores já repassados</small></article>
+        <article class="orvyn-stat orvyn-stat-highlight"><span>Pendente de repasse</span><strong>${formatCurrency(t.faltaRepassar)}</strong><small>Saldo da participação do sócio</small></article>
+      </div>
+
+      <div class="orvyn-overview-grid">
+        <section class="orvyn-panel orvyn-route-panel"><div class="orvyn-panel-head"><div><span class="orvyn-kicker">CARTEIRA ÚNICA</span><h2>Clientes e contratos</h2></div><span class="orvyn-share-icon">${getOrvynClients().length}</span></div>
+          <p class="orvyn-share-note">Cadastre e acompanhe todos os clientes, projetos e contratos na carteira Clientes. Marque a origem como ORVYN para vinculá-los ao financeiro da agência.</p><div class="orvyn-route-actions"><button class="orvyn-btn orvyn-btn-light" id="orvynGerenciarClientes">Abrir carteira de clientes</button><button class="orvyn-text-btn" id="orvynGerenciarContratos">Ir para contratos ↗</button></div>
+        </section>
+        <section class="orvyn-panel orvyn-share-panel"><div class="orvyn-panel-head"><div><span class="orvyn-kicker">PARTICIPAÇÃO</span><h2>Repasse ao sócio</h2></div><span class="orvyn-share-icon">↗</span></div>
+          <p class="orvyn-share-note">Cada recebimento confirmado gera automaticamente <strong>${t.percentual}%</strong> de participação.</p><div class="orvyn-share-equation"><div><span>Parte acumulada</span><strong>${formatCurrency(t.parteSocio)}</strong></div><b>−</b><div><span>Já repassado</span><strong>${formatCurrency(t.repassado)}</strong></div></div><div class="orvyn-due-line"><span>Em aberto</span><strong>${formatCurrency(t.faltaRepassar)}</strong></div><button class="orvyn-btn orvyn-btn-dark" id="orvynRegistrarRepasse" ${t.faltaRepassar <= 0 ? 'disabled' : ''}>Registrar repasse</button>
+          ${o.transfers.length ? `<div class="orvyn-recent-transfer"><span>Último repasse</span><strong>${formatDateBR(o.transfers.slice().sort((a,b) => String(b.data).localeCompare(String(a.data)))[0].data)} · ${formatCurrency(o.transfers.slice().sort((a,b) => String(b.data).localeCompare(String(a.data)))[0].valor)}</strong></div>` : ''}
+        </section>
+      </div>
+
+      <div class="orvyn-section-head orvyn-ledger-head"><div><span class="orvyn-kicker">MOVIMENTAÇÕES</span><h2>Financeiro da agência</h2></div><div class="orvyn-quick-actions"><button class="orvyn-btn orvyn-btn-outline" id="orvynNovaDespesa">+ Registrar saída</button></div></div>
+      <section class="orvyn-panel orvyn-ledger-panel"><div class="orvyn-ledger-summary"><span>Em recebimentos pendentes <strong>${formatCurrency(t.pendenteCliente)}</strong></span><span>Saídas registradas <strong>${formatCurrency(t.despesas)}</strong></span></div>
+        ${o.payments.length || o.expenses.length ? `<div class="orvyn-ledger">${[
+          ...o.payments.map(x => ({...x, kind:'payment'})), ...o.expenses.map(x => ({...x, kind:'expense'}))
+        ].sort((a,b) => String(b.data || '').localeCompare(String(a.data || ''))).map(x => { const cliente = getClients().find(c => c.id === x.clientId); const despesa = x.kind === 'expense'; return `<div class="orvyn-ledger-row"><span class="orvyn-ledger-symbol ${despesa ? 'is-out' : x.status === 'recebido' ? 'is-in' : 'is-pending'}">${despesa ? '−' : x.status === 'recebido' ? '+' : '·'}</span><div class="orvyn-ledger-desc"><strong>${escapeHtml(x.descricao || (despesa ? 'Saída da agência' : 'Recebimento'))}</strong><span>${escapeHtml(cliente?.nome || (despesa ? 'Despesa ORVYN' : 'Cliente não informado'))} · ${formatDateBR(x.data)}</span></div><span class="orvyn-ledger-status ${despesa ? 'is-out' : x.status === 'recebido' ? 'is-paid' : 'is-pending'}">${despesa ? 'Saída' : x.status === 'recebido' ? 'Recebido' : 'Pendente'}</span><strong class="orvyn-ledger-amount ${despesa ? 'is-out' : ''}">${despesa ? '− ' : ''}${formatCurrency(x.valor)}</strong>${!despesa && x.status !== 'recebido' ? `<button class="orvyn-small-action" data-orvyn-mark-payment="${escapeHtml(x.id)}">Confirmar</button>` : ''}<button class="orvyn-small-action is-delete" data-orvyn-delete-entry="${escapeHtml(x.id)}" data-orvyn-kind="${x.kind}">Remover</button></div>`; }).join('')}</div>` : `<div class="orvyn-empty orvyn-empty-compact"><strong>Nenhuma movimentação por enquanto.</strong><p>Lance recebimentos de clientes para acompanhar automaticamente a participação do sócio.</p></div>`}
+      </section>
+      ${o.transfers.length ? `<section class="orvyn-panel orvyn-transfers-panel"><div class="orvyn-panel-head"><div><span class="orvyn-kicker">HISTÓRICO</span><h2>Repasses registrados</h2></div></div><div class="orvyn-ledger">${o.transfers.slice().sort((a,b) => String(b.data).localeCompare(String(a.data))).map(x => `<div class="orvyn-ledger-row"><span class="orvyn-ledger-symbol is-transfer">↗</span><div class="orvyn-ledger-desc"><strong>Repasse ao sócio</strong><span>${escapeHtml(x.nota || 'Participação ORVYN')} · ${formatDateBR(x.data)}</span></div><span class="orvyn-ledger-status is-paid">Registrado</span><strong class="orvyn-ledger-amount">${formatCurrency(x.valor)}</strong></div>`).join('')}</div></section>` : ''}
+      <footer class="orvyn-footer"><span>ORVYN STUDIO</span><span>O mundo já viu o suficiente.</span></footer>
+    </section>`;
+
+  wireFinanceWalletSwitch();
+  qs('#orvynVoltarInicio').onclick = () => { _orvynSubpage = 'home'; renderOrvyn(); };
+  qs('#orvynGerenciarClientes').onclick = abrirClientesOrvyn;
+  qs('#orvynGerenciarContratos').onclick = () => navigate('contratos', { origem: 'orvyn' });
+  qs('#orvynNovoRecebimento').onclick = () => openOrvynPaymentModal();
+  qs('#orvynRegistrarRepasse').onclick = () => { if (t.faltaRepassar > 0) openOrvynTransferModal(t.faltaRepassar); };
+  qs('#orvynNovaDespesa').onclick = () => openOrvynExpenseModal();
+  qsa('[data-orvyn-mark-payment]').forEach(b => b.onclick = () => {
+    saveOrvyn({ payments: o.payments.map(x => x.id === b.dataset.orvynMarkPayment ? { ...x, status: 'recebido', data: todayISO() } : x) }); renderOrvyn();
+  });
+  qsa('[data-orvyn-delete-entry]').forEach(b => b.onclick = () => {
+    if (!confirm('Remover este lançamento do financeiro da ORVYN?')) return;
+    const key = b.dataset.orvynKind === 'expense' ? 'expenses' : 'payments';
+    saveOrvyn({ [key]: o[key].filter(x => x.id !== b.dataset.orvynDeleteEntry) }); renderOrvyn();
+  });
+}
+
+function openOrvynPaymentModal() {
+  const clients = getOrvynClients();
+  openModal(`<div class="modal-title">Lançar recebimento</div><form id="orvynPaymentForm"><div class="field"><label class="field-label">Cliente</label><select class="input" id="ovPaymentClient"><option value="">Recebimento avulso</option>${clients.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.nome)}</option>`).join('')}</select></div><div class="field"><label class="field-label">Descrição</label><input class="input" id="ovPaymentDesc" required placeholder="Ex.: Mensalidade de novembro"></div><div class="field-row"><div class="field"><label class="field-label">Valor (R$)</label><input class="input" type="number" min="0.01" step="0.01" id="ovPaymentValue" required></div><div class="field"><label class="field-label">Data</label><input class="input" type="date" id="ovPaymentDate" value="${todayISO()}" required></div></div><div class="field"><label class="field-label">Situação</label><select class="input" id="ovPaymentStatus"><option value="recebido">Já recebido</option><option value="pendente">A receber</option></select></div><p class="orvyn-form-note">O repasse de 50% só é calculado quando a situação estiver como recebido.</p><div class="modal-actions"><button type="button" class="btn btn-ghost" id="ovPaymentCancel">Cancelar</button><button class="btn btn-primary" type="submit">Salvar recebimento</button></div></form>`);
+  qs('#ovPaymentCancel').onclick = closeModal;
+  qs('#orvynPaymentForm').onsubmit = e => { e.preventDefault(); const o = getOrvyn(); const item = { id: uid(), clientId: qs('#ovPaymentClient').value, descricao: qs('#ovPaymentDesc').value.trim(), valor: Number(qs('#ovPaymentValue').value) || 0, data: qs('#ovPaymentDate').value, status: qs('#ovPaymentStatus').value }; saveOrvyn({ payments: [...o.payments, item] }); closeModal(); renderOrvyn(); };
+}
+
+function openOrvynTransferModal(pendente) {
+  openModal(`<div class="modal-title">Registrar repasse ao sócio</div><p class="view-desc">O saldo estimado em aberto é <strong>${formatCurrency(pendente)}</strong>. Este registro documenta um repasse já realizado.</p><form id="orvynTransferForm"><div class="field-row"><div class="field"><label class="field-label">Valor repassado (R$)</label><input class="input" type="number" min="0.01" step="0.01" max="${pendente.toFixed(2)}" id="ovTransferValue" value="${pendente.toFixed(2)}" required></div><div class="field"><label class="field-label">Data do repasse</label><input class="input" type="date" id="ovTransferDate" value="${todayISO()}" required></div></div><div class="field"><label class="field-label">Observação (opcional)</label><input class="input" id="ovTransferNote" placeholder="Ex.: repasse referente à primeira quinzena"></div><div class="modal-actions"><button type="button" class="btn btn-ghost" id="ovTransferCancel">Cancelar</button><button class="btn btn-primary" type="submit">Salvar registro</button></div></form>`);
+  qs('#ovTransferCancel').onclick = closeModal;
+  qs('#orvynTransferForm').onsubmit = e => { e.preventDefault(); const valor = Number(qs('#ovTransferValue').value) || 0; if (valor <= 0 || valor > pendente + 0.001) { alert(`Informe um valor entre R$ 0,01 e ${formatCurrency(pendente)}.`); return; } const o = getOrvyn(); saveOrvyn({ transfers: [...o.transfers, { id: uid(), valor, data: qs('#ovTransferDate').value, nota: qs('#ovTransferNote').value.trim() }] }); closeModal(); renderOrvyn(); };
+}
+
+function openOrvynExpenseModal() {
+  openModal(`<div class="modal-title">Registrar saída da agência</div><form id="orvynExpenseForm"><div class="field"><label class="field-label">Descrição</label><input class="input" id="ovExpenseDesc" required placeholder="Ex.: Ferramenta de criação"></div><div class="field-row"><div class="field"><label class="field-label">Valor (R$)</label><input class="input" type="number" min="0.01" step="0.01" id="ovExpenseValue" required></div><div class="field"><label class="field-label">Data</label><input class="input" type="date" id="ovExpenseDate" value="${todayISO()}" required></div></div><div class="modal-actions"><button type="button" class="btn btn-ghost" id="ovExpenseCancel">Cancelar</button><button class="btn btn-primary" type="submit">Salvar saída</button></div></form>`);
+  qs('#ovExpenseCancel').onclick = closeModal;
+  qs('#orvynExpenseForm').onsubmit = e => { e.preventDefault(); const o = getOrvyn(); saveOrvyn({ expenses: [...o.expenses, { id: uid(), descricao: qs('#ovExpenseDesc').value.trim(), valor: Number(qs('#ovExpenseValue').value) || 0, data: qs('#ovExpenseDate').value }] }); closeModal(); renderOrvyn(); };
+}
+
 // ---------- RELATÓRIOS ----------
 // ---------- REPOSITÓRIOS DOS CLIENTES + BLOQUEIO POR FALTA DE PAGAMENTO ----------
 // Cada cliente pode ter um ou mais repositórios (link). Se o pagamento não foi
@@ -5315,14 +6433,16 @@ function renderRepositorios() {
               ${links}
               <button class="btn btn-ghost btn-sm" data-repos-edit="${c.id}">${repos.length ? 'Editar links' : '+ Repositório'}</button>
               ${st.bloqueado
-                ? `<button class="btn btn-primary btn-sm" data-repo-liberar="${c.id}">Liberar</button>`
+                ? `<button class="btn btn-ghost btn-sm" data-repo-avisar="${c.id}:bloqueio">📩 Avisar bloqueio</button><button class="btn btn-primary btn-sm" data-repo-liberar="${c.id}">Liberar</button>`
                 : `<button class="btn btn-danger btn-sm" data-repo-bloquear="${c.id}">Marcar bloqueado</button>`}
+              ${!st.bloqueado && c.bloqueio && c.bloqueio.liberadoEm ? `<button class="btn btn-ghost btn-sm" data-repo-avisar="${c.id}:liberacao">📩 Avisar liberação</button>` : ''}
               <button class="btn btn-ghost btn-sm" data-repo-ocultar="${c.id}" title="Tira o cliente desta tela (não exclui o cliente)">Remover da tela</button>
             </div>
           </div>`;
       }).join('')}</div>`);
 
     qsa('[data-repos-edit]').forEach(b => b.onclick = () => openRepositoriosModal(b.dataset.reposEdit, pintar));
+    qsa('[data-repo-avisar]').forEach(b => b.onclick = () => { const [id, tipo] = b.dataset.repoAvisar.split(':'); openAvisoSistemaWhatsappModal(id, tipo); });
     qsa('[data-repo-ocultar]').forEach(b => b.onclick = () => {
       const cli = clientById(b.dataset.repoOcultar);
       if (!confirm(`Tirar ${cli.nome} desta tela?\n\nO cliente NÃO é excluído, só deixa de aparecer em Repositórios. Você pode trazer de volta em "+ Adicionar cliente à tela".`)) return;
@@ -5335,6 +6455,7 @@ function renderRepositorios() {
       saveClients(getClients().map(x => x.id === cli.id
         ? { ...x, bloqueio: { ativo: true, desde: new Date().toISOString(), liberadoEm: null } } : x));
       pintar();
+      openAvisoSistemaWhatsappModal(cli.id, 'bloqueio');
     });
     qsa('[data-repo-liberar]').forEach(b => b.onclick = () => {
       const cli = clientById(b.dataset.repoLiberar);
@@ -5343,6 +6464,7 @@ function renderRepositorios() {
       saveClients(getClients().map(x => x.id === cli.id
         ? { ...x, bloqueio: { ...(x.bloqueio || {}), ativo: false, liberadoEm: new Date().toISOString() } } : x));
       pintar();
+      openAvisoSistemaWhatsappModal(cli.id, 'liberacao');
     });
   }
 
@@ -5548,27 +6670,62 @@ const CONTRATADO_PADRAO = {
   contratado_email: 'dev.neresdalton@gmail.com',
   contratado_telefone: '(46) 99971-1937'
 };
-function getContratadoInfo() {
+const CONTRATADO_ORVYN_PADRAO = {
+  contratado_nome: 'ORVYN Studio',
+  contratado_profissao: 'Agência de marketing',
+  contratado_cpf: '',
+  contratado_endereco: '',
+  contratado_cidade_uf: '',
+  contratado_cep: '',
+  contratado_email: '',
+  contratado_telefone: ''
+};
+function getContratadoInfo(registro) {
+  const origem = registro?._origem || clientById(registro?._clientId)?.origem;
+  if (origem === 'orvyn') {
+    const contratadoOrvyn = getOrvyn().settings?.contratado || {};
+    // Use the personal identity until the agency's CNPJ is configured.
+    if (contratadoOrvyn.contratado_cpf && contratadoOrvyn.contratado_cpf.trim()) {
+      return { ...CONTRATADO_ORVYN_PADRAO, ...contratadoOrvyn };
+    }
+  }
   return { ...CONTRATADO_PADRAO, ...(getSettings().contratado || {}) };
 }
+function contratoUsaOrvyn(registro) {
+  return (registro?._origem || clientById(registro?._clientId)?.origem) === 'orvyn';
+}
 const MARCADOR_PENDENTE = '【A PREENCHER】';
+let _contratosOrigemFiltro = 'pessoal';
 
 function renderContratos() {
-  const contratos = getContratos().slice().reverse();
+  const contratosTodos = getContratos();
+  const contratos = contratosTodos.filter(c => {
+    const origem = c._origem || clientById(c._clientId)?.origem || 'pessoal';
+    return origem === _contratosOrigemFiltro;
+  }).slice().reverse();
+  const totalPessoal = contratosTodos.filter(c => (c._origem || clientById(c._clientId)?.origem || 'pessoal') === 'pessoal').length;
+  const totalOrvyn = contratosTodos.filter(c => (c._origem || clientById(c._clientId)?.origem || 'pessoal') === 'orvyn').length;
+  const nomeCarteira = _contratosOrigemFiltro === 'orvyn' ? 'da ORVYN' : 'pessoais';
   qs('#main').innerHTML = `
     <div class="view-header">
       <div>
-        <div class="view-title">Contratos</div>
+        <div class="view-title">Contratos ${nomeCarteira}</div>
         <div class="view-desc">Gera o contrato já com os dados do cliente e do plano — o resto (prazos, percentuais, cronograma, valores detalhados) vem marcado pra você completar no Word.</div>
       </div>
       <button class="btn btn-primary" id="btnNovoContrato">+ Gerar contrato</button>
     </div>
-    ${contratos.length === 0 ? emptyState('Nenhum contrato gerado ainda', 'Clique em "Gerar contrato" pra montar o primeiro.') : `
+    <div class="portfolio-switch" aria-label="Carteira de contratos">
+      <button type="button" data-contrato-origem="pessoal" class="${_contratosOrigemFiltro === 'pessoal' ? 'active' : ''}">Pessoal <span>${totalPessoal}</span></button>
+      <button type="button" data-contrato-origem="orvyn" class="${_contratosOrigemFiltro === 'orvyn' ? 'active' : ''}">ORVYN Studio <span>${totalOrvyn}</span></button>
+    </div>
+    ${contratos.length === 0 ? emptyState(_contratosOrigemFiltro === 'orvyn' ? 'Nenhum contrato da ORVYN ainda' : 'Nenhum contrato pessoal ainda', 'Clique em "Gerar contrato" pra montar o primeiro.') : `
       <div class="ledger">
-        ${contratos.map(c => `
+        ${contratos.map(c => {
+          const origem = c._origem || clientById(c._clientId)?.origem || 'pessoal';
+          return `
           <div class="ledger-row">
             <div class="ledger-main">
-              <div class="ledger-title">${escapeHtml(c.contratante_nome || 'Sem nome')}</div>
+              <div class="ledger-title">${escapeHtml(c.contratante_nome || 'Sem nome')}${origem === 'orvyn' ? ' <span class="orvyn-badge">ORVYN</span>' : ''}</div>
               <div class="ledger-sub">${c.planoNome ? escapeHtml(c.planoNome) + ' · ' : ''}gerado em ${formatDateBR(c.criadoEm)}</div>
             </div>
             <div class="ledger-actions">
@@ -5578,10 +6735,12 @@ function renderContratos() {
               <button class="btn btn-danger btn-sm" data-del-contrato="${c.id}">Excluir</button>
             </div>
           </div>
-        `).join('')}
+        `;
+        }).join('')}
       </div>
     `}
   `;
+  qsa('[data-contrato-origem]').forEach(b => b.onclick = () => navigate('contratos', { origem: b.dataset.contratoOrigem }));
   qs('#btnNovoContrato').onclick = () => openContratoModal();
   qsa('[data-baixar-docx]').forEach(b => b.onclick = () => gerarContratoDocx(getContratos().find(x => x.id === b.dataset.baixarDocx)));
   qsa('[data-baixar-pdf]').forEach(b => b.onclick = () => gerarContratoPDF(getContratos().find(x => x.id === b.dataset.baixarPdf)));
@@ -5634,7 +6793,7 @@ function openContratoModal(editingId) {
         <label class="field-label">Preencher com cliente já cadastrado (opcional)</label>
         <select class="input" id="ctClienteExistente">
           <option value="">— digitar manualmente —</option>
-          ${clients.map(c => `<option value="${c.id}" ${editing && editing._clientId === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}</option>`).join('')}
+          ${clients.map(c => `<option value="${c.id}" ${editing && editing._clientId === c.id ? 'selected' : ''}>${escapeHtml(c.nome)}${c.origem === 'orvyn' ? ' · ORVYN' : ''}</option>`).join('')}
         </select>
       </div>
       <div class="field-row">
@@ -5882,6 +7041,7 @@ function openContratoModal(editingId) {
 
     const dados = {
       _clientId: qs('#ctClienteExistente').value || null,
+      _origem: (clientById(qs('#ctClienteExistente').value)?.origem || editing?._origem || _contratosOrigemFiltro || 'pessoal'),
       _tipo: tipo,
       _planoId: planoId || null,
       _orcamentoId: orcamentoId || null,
@@ -5938,7 +7098,7 @@ async function gerarContratoDocx(registro) {
     if (!resp.ok) throw new Error(`Não achei o arquivo assets/contrato-template.docx (status ${resp.status}). Confira se ele está na pasta certa.`);
     const buf = await resp.arrayBuffer();
     const zip = new PizZip(buf);
-    const dados = { ...getContratadoInfo(), ...registro };
+    const dados = { ...getContratadoInfo(registro), ...registro };
     const doc = new window.docxtemplater(zip, {
       paragraphLoop: true,
       linebreaks: true,
@@ -5956,7 +7116,7 @@ async function gerarContratoDocx(registro) {
     documentXml = documentXml.replace('<w:body>', '<w:body>' + paragrafoLogo);
     pacote.file('word/document.xml', documentXml);
     let relsXml = pacote.file('word/_rels/document.xml.rels').asText();
-    relsXml = relsXml.replace('</Relationships>', '<Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/dalton-neres-logo.png"/></Relationships>');
+    relsXml = relsXml.replace('</Relationships>', '<Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/contrato-logo.png"/></Relationships>');
     pacote.file('word/_rels/document.xml.rels', relsXml);
     let contentTypesXml = pacote.file('[Content_Types].xml').asText();
     if (!contentTypesXml.includes('Extension="png"')) {
@@ -5983,7 +7143,7 @@ async function gerarContratoPDF(registro) {
     const resp = await fetch('assets/contrato-template.html');
     if (!resp.ok) throw new Error(`Não achei o arquivo assets/contrato-template.html (status ${resp.status}). Confira se ele está na pasta certa.`);
     let html = await resp.text();
-    const dados = { ...getContratadoInfo(), ...registro };
+    const dados = { ...getContratadoInfo(registro), ...registro };
     html = html.replace(/\{([a-z_0-9]+)\}/g, (m, key) => {
       const v = dados[key];
       return escapeHtml(v && String(v).trim() ? v : MARCADOR_PENDENTE);
@@ -5992,7 +7152,11 @@ async function gerarContratoPDF(registro) {
     wrapper.style.cssText = 'height:0; overflow:hidden;';
     const container = document.createElement('div');
     container.innerHTML = html;
+    const usaOrvyn = contratoUsaOrvyn(registro);
+    const logoUrl = usaOrvyn ? 'images/orvyn-logo-contract.png' : 'images/dalton-neres-colorida.png';
+    const logoNome = usaOrvyn ? 'ORVYN Studio' : 'Dalton Neres Developer';
     if (!container.querySelector('img')) container.insertAdjacentHTML('afterbegin', '<div style="text-align:right; margin-bottom:12px;"><img src="images/dalton-neres-colorida.png" alt="Dalton Neres Developer" style="width:150px;"></div>');
+    container.querySelectorAll('img').forEach(img => { img.src = logoUrl; img.alt = logoNome; img.style.width = usaOrvyn ? '150px' : '150px'; });
     container.style.cssText = 'width:720px; padding:20px; font-family:Georgia,serif; font-size:12.5px; line-height:1.5; background:#fff; color:#111;';
     wrapper.appendChild(container);
     document.body.appendChild(wrapper);
@@ -6232,6 +7396,26 @@ function renderConfig() {
       <button type="submit" class="btn btn-primary">Salvar</button>
     </form>
 
+    <div class="section-title">Dados da ORVYN nos contratos</div>
+    <p class="view-desc" style="margin-bottom:14px; max-width:560px;">Quando o CNPJ da ORVYN estiver preenchido, estes dados serão usados nos contratos da agência. Até lá, o contrato mantém a logo ORVYN e usa seus dados pessoais como contratado.</p>
+    <form id="orvynContratadoForm" style="max-width:560px; margin-bottom:32px;">
+      <div class="field-row">
+        <div class="field"><label class="field-label">Nome / Razão social</label><input class="input" id="ovNome" value="${escapeHtml((getOrvyn().settings?.contratado && getOrvyn().settings.contratado.contratado_nome) || CONTRATADO_ORVYN_PADRAO.contratado_nome)}"></div>
+        <div class="field"><label class="field-label">CNPJ (quando houver)</label><input class="input" id="ovCnpj" value="${escapeHtml((getOrvyn().settings?.contratado && getOrvyn().settings.contratado.contratado_cpf) || '')}" placeholder="Ainda não definido"></div>
+      </div>
+      <div class="field"><label class="field-label">Atividade / profissão</label><input class="input" id="ovProfissao" value="${escapeHtml((getOrvyn().settings?.contratado && getOrvyn().settings.contratado.contratado_profissao) || CONTRATADO_ORVYN_PADRAO.contratado_profissao)}"></div>
+      <div class="field"><label class="field-label">Endereço</label><input class="input" id="ovEndereco" value="${escapeHtml((getOrvyn().settings?.contratado && getOrvyn().settings.contratado.contratado_endereco) || '')}"></div>
+      <div class="field-row">
+        <div class="field"><label class="field-label">Cidade/UF</label><input class="input" id="ovCidadeUf" value="${escapeHtml((getOrvyn().settings?.contratado && getOrvyn().settings.contratado.contratado_cidade_uf) || '')}"></div>
+        <div class="field"><label class="field-label">CEP</label><input class="input" id="ovCep" value="${escapeHtml((getOrvyn().settings?.contratado && getOrvyn().settings.contratado.contratado_cep) || '')}"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label class="field-label">E-mail</label><input class="input" id="ovEmail" value="${escapeHtml((getOrvyn().settings?.contratado && getOrvyn().settings.contratado.contratado_email) || '')}"></div>
+        <div class="field"><label class="field-label">Telefone/WhatsApp</label><input class="input" id="ovTelefone" value="${escapeHtml((getOrvyn().settings?.contratado && getOrvyn().settings.contratado.contratado_telefone) || '')}"></div>
+      </div>
+      <button type="submit" class="btn btn-primary">Salvar dados da ORVYN</button>
+    </form>
+
     <div class="section-title">Backup dos dados</div>
     <p class="view-desc" style="margin-bottom:14px; max-width:520px;">
       Seus dados já ficam salvos na nuvem (Firebase), então não somem se você trocar
@@ -6395,6 +7579,22 @@ function renderConfig() {
     alert('Salvo.');
   };
 
+  qs('#orvynContratadoForm').onsubmit = (e) => {
+    e.preventDefault();
+    const settings = getOrvyn().settings || {};
+    saveOrvyn({ settings: { ...settings, contratado: {
+      contratado_nome: qs('#ovNome').value.trim() || CONTRATADO_ORVYN_PADRAO.contratado_nome,
+      contratado_cpf: qs('#ovCnpj').value.trim(),
+      contratado_profissao: qs('#ovProfissao').value.trim() || CONTRATADO_ORVYN_PADRAO.contratado_profissao,
+      contratado_endereco: qs('#ovEndereco').value.trim(),
+      contratado_cidade_uf: qs('#ovCidadeUf').value.trim(),
+      contratado_cep: qs('#ovCep').value.trim(),
+      contratado_email: qs('#ovEmail').value.trim(),
+      contratado_telefone: qs('#ovTelefone').value.trim()
+    } } });
+    alert('Dados da ORVYN salvos.');
+  };
+
   qs('#btnExport').onclick = () => {
     const data = { clients: getClients(), charges: getCharges(), meetings: getMeetings(), settings: getSettings(), exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -6490,11 +7690,24 @@ document.addEventListener('DOMContentLoaded', () => {
     auth.signOut();
   });
 
+  // Avisos claros em vez de "travar" quando algo externo não carrega
+  const lockErr = qs('#lockError');
+  const avisoLogin = (msg) => { if (lockErr) { lockErr.textContent = msg; lockErr.classList.remove('hidden'); } };
+  if (location.protocol === 'file:') avisoLogin('Abra o app pelo endereço do site (https://…), não clicando no arquivo — o login do Firebase não funciona assim.');
+  if (typeof auth === 'undefined' || typeof db === 'undefined') {
+    avisoLogin('Não consegui carregar o Firebase (js/firebase-config.js ou a internet). Aperte Ctrl+F5 e confira se o arquivo js/firebase-config.js está publicado.');
+    return;
+  }
+
   auth.onAuthStateChanged(async (user) => {
     if (user) {
       _meuUid = user.uid;
-      const donoUid = await resolveSyncTarget(user.uid);
-      startFirestoreSync(donoUid);
+      // a checagem de vínculo não pode segurar o login: se demorar mais de 8s, segue com a própria conta
+      let donoUid = user.uid;
+      try {
+        donoUid = await Promise.race([resolveSyncTarget(user.uid), new Promise(r => setTimeout(() => r(user.uid), 8000))]);
+      } catch (err) { console.error(err); }
+      try { startFirestoreSync(donoUid); } catch (err) { console.error('Erro ao iniciar a sincronização:', err); }
       enterApp();
     } else {
       _meuUid = null;
