@@ -1216,12 +1216,12 @@ button:focus-visible, .nav-btn:focus-visible, input:focus-visible{
 
 /* ===== ORVYN STUDIO — identidade visual da agência ===== */
 .sidebar-agency{margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.12);}
-.nav-btn-orvyn{width:100%;margin:0;border:1px solid rgba(161,139,250,.35);color:#e9e2ff;background:rgba(161,139,250,.08);font-weight:600;}
-.nav-btn-orvyn:hover,.nav-btn-orvyn.active{background:#A18BFA; border-color:#A18BFA; color:#1C1338;}
+.nav-btn-orvyn{width:100%;margin:0;border:1px solid rgba(167,139,250,.35);color:#e9e2ff;background:rgba(167,139,250,.08);font-weight:600;}
+.nav-btn-orvyn:hover,.nav-btn-orvyn.active{background:#A78BFA; border-color:#A78BFA; color:#1C1338;}
 .orvyn-nav-mark{display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; border:1px solid currentColor; border-radius:6px 6px 2px 6px; font:700 11px 'Orbitron',sans-serif; margin-right:7px;}
-.orvyn-view{--ov-lav:#A18BFA;--ov-ink:#1C1338;--ov-paper:#F5F5F5;--ov-muted:#817A93;--ov-line:#E8E4EF;--ov-green:#32765F;max-width:1380px;margin:0 auto;padding:0 4px 28px;color:var(--ov-ink);}
+.orvyn-view{--ov-lav:#A78BFA;--ov-ink:#1C1338;--ov-paper:#E8E5F0;--ov-lime:#B7FF44;--ov-muted:#817A93;--ov-line:#E8E4EF;--ov-green:#32765F;max-width:1380px;margin:0 auto;padding:0 4px 28px;color:var(--ov-ink);}
 .orvyn-hero{position:relative;overflow:hidden;display:flex;align-items:center;gap:54px;min-height:232px;padding:34px 42px;background:var(--ov-ink);color:#F5F5F5;border-radius:8px;margin-bottom:34px;isolation:isolate;}
-.orvyn-hero:after{content:'O';position:absolute;right:8%;top:-105px;font:800 360px/1 'Orbitron',sans-serif;color:rgba(161,139,250,.09);z-index:-1;letter-spacing:-32px;}
+.orvyn-hero:after{content:'O';position:absolute;right:8%;top:-105px;font:800 360px/1 'Orbitron',sans-serif;color:rgba(167,139,250,.09);z-index:-1;letter-spacing:-32px;}
 .orvyn-brand-lockup{display:flex;align-items:center;min-width:220px;width:260px;border-right:1px solid rgba(245,245,245,.18);padding-right:30px;}
 .orvyn-logo{display:block;width:100%;height:auto;}
 .orvyn-wordmark{font:800 38px/.95 'Orbitron',sans-serif;letter-spacing:1px;color:var(--ov-lav);}
@@ -1230,7 +1230,7 @@ button:focus-visible, .nav-btn:focus-visible, input:focus-visible{
 .orvyn-eyebrow,.orvyn-kicker{font:600 9px/1.5 'Orbitron',sans-serif;letter-spacing:1.25px;color:var(--ov-lav);}
 .orvyn-hero-copy h1{font:700 clamp(29px,4vw,42px)/1.1 'Orbitron',sans-serif;color:#F5F5F5;margin:8px 0;}
 .orvyn-hero-copy p{color:#d2cbdf;font-size:14px;max-width:410px;line-height:1.55;}
-.orvyn-share-pill{position:relative;z-index:1;border:1px solid rgba(161,139,250,.45);background:rgba(161,139,250,.12);border-radius:7px;padding:14px 17px;display:flex;align-items:center;gap:13px;}
+.orvyn-share-pill{position:relative;z-index:1;border:1px solid rgba(167,139,250,.45);background:rgba(167,139,250,.12);border-radius:7px;padding:14px 17px;display:flex;align-items:center;gap:13px;}
 .orvyn-share-pill strong{font:700 25px 'Orbitron',sans-serif;color:var(--ov-lav);}
 .orvyn-share-pill span{font-size:10px;line-height:1.5;color:#e1dbea;}
 .orvyn-section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:0 2px 16px;}
@@ -1284,7 +1284,7 @@ button:focus-visible, .nav-btn:focus-visible, input:focus-visible{
 .finance-wallet-switch{margin-top:0;}
 .finance-hub-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;max-width:860px;margin-top:18px;}
 .finance-hub-card{display:flex;flex-direction:column;align-items:flex-start;min-height:200px;padding:22px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);text-align:left;cursor:pointer;transition:transform .15s,border-color .15s,box-shadow .15s;}
-.finance-hub-card:hover{transform:translateY(-2px);border-color:#a18bfa;box-shadow:0 8px 22px rgba(28,19,56,.08);}
+.finance-hub-card:hover{transform:translateY(-2px);border-color:#A78BFA;box-shadow:0 8px 22px rgba(28,19,56,.08);}
 .finance-hub-icon{display:grid;place-items:center;width:36px;height:36px;margin-bottom:22px;border-radius:7px;background:var(--brand-bg);color:var(--brand);font-size:18px;font-weight:700;}
 .finance-hub-card>strong{font-size:16px;}
 .finance-hub-card>span:not(.finance-hub-icon){margin-top:6px;color:var(--ink-soft);font-size:12px;}
@@ -1349,10 +1349,20 @@ button:focus-visible, .nav-btn:focus-visible, input:focus-visible{
 .orvyn-empty-compact{padding:24px 18px;}
 .orvyn-empty-compact>strong{font:500 12px 'IBM Plex Sans',sans-serif;}
 .orvyn-empty-compact p{margin-bottom:0;}
-.orvyn-form-note{font-size:11px;line-height:1.5;color:#756b82;background:#f6f3fb;border-left:3px solid #A18BFA;padding:10px 12px;margin:2px 0 14px;}
+.orvyn-form-note{font-size:11px;line-height:1.5;color:#756b82;background:#f6f3fb;border-left:3px solid #A78BFA;padding:10px 12px;margin:2px 0 14px;}
 .orvyn-transfers-panel{margin-top:6px;}
 .orvyn-footer{display:flex;justify-content:space-between;gap:12px;padding:19px 4px 0;border-top:1px solid #e4dff0;color:#8d829e;font:500 8px 'Orbitron',sans-serif;letter-spacing:.8px;}
 @media(max-width:1050px){.orvyn-stats{grid-template-columns:repeat(2,minmax(0,1fr));}.orvyn-overview-grid{grid-template-columns:1fr;}.orvyn-hero{gap:28px;padding:30px;}}
 @media(max-width:700px){.orvyn-view{padding:0 0 22px;}.orvyn-home-hero{min-height:0;flex-direction:column;align-items:flex-start;gap:20px;padding:25px 20px;}.orvyn-home-hero>img{width:min(230px,75%);}.orvyn-home-grid{grid-template-columns:1fr;gap:10px;}.orvyn-home-card{min-height:170px;padding:17px;}.orvyn-hero{min-height:0;flex-wrap:wrap;gap:20px;padding:25px 20px;margin-bottom:26px;}.orvyn-hero:after{right:-8%;top:-50px;font-size:240px;}.orvyn-brand-lockup{min-width:0;width:100%;max-width:260px;border-right:0;border-bottom:1px solid rgba(245,245,245,.18);padding:0 0 15px;}.orvyn-wordmark{font-size:32px;}.orvyn-hero-copy{min-width:180px;}.orvyn-share-pill{margin-left:auto;padding:10px 11px;}.orvyn-share-pill strong{font-size:20px;}.orvyn-section-head{align-items:flex-start;flex-direction:column;}.orvyn-quick-actions{width:100%;}.orvyn-quick-actions .orvyn-btn{flex:1;}.orvyn-stats{gap:8px;}.orvyn-stat{min-height:118px;padding:12px;}.orvyn-stat strong{font-size:16px;}.orvyn-panel{padding:15px;}.orvyn-client-row{gap:8px;}.orvyn-contract-state{display:none;}.orvyn-ledger-panel{padding:0 12px 8px;}.orvyn-ledger-row{gap:7px;flex-wrap:wrap;}.orvyn-ledger-desc{min-width:calc(100% - 42px);}.orvyn-ledger-status{margin-left:35px;}.orvyn-small-action{margin-left:auto;}.orvyn-footer{font-size:7px;}}
 @media(max-width:390px){.orvyn-stats{grid-template-columns:1fr 1fr;}.orvyn-share-equation{grid-template-columns:1fr 12px 1fr;gap:5px;}.orvyn-share-equation strong{font-size:12px;}}
 
+/* ===== ORVYN — identidade v2 (lavanda #A78BFA · tinta #1C1338 · verde #B7FF44 · claro #E8E5F0) ===== */
+.orvyn-nav-mark{border:0;padding:0;overflow:hidden;border-radius:5px;background:#1C1338;}
+.orvyn-nav-mark img{display:block;width:100%;height:100%;object-fit:cover;}
+.orvyn-hero,.orvyn-home-hero{border-bottom:4px solid var(--ov-lime);}
+.orvyn-share-pill strong{color:var(--ov-lime);}
+.orvyn-btn-primary{box-shadow:inset 0 -3px 0 var(--ov-lime);}
+.orvyn-stat-highlight{box-shadow:inset 0 -4px 0 var(--ov-lime);}
+.orvyn-home-card:hover{border-color:var(--ov-lav);}
+.orvyn-footer span:last-child{color:var(--ov-ink);font-weight:700;}
+.orvyn-client-tag,.orvyn-badge{background:#E8E5F0;color:#1C1338;box-shadow:inset 0 -2px 0 #B7FF44;}

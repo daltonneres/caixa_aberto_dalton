@@ -416,12 +416,17 @@ function nomeArquivoSeguro(s) {
 }
 
 // Base visual comum (cobrança e recibo): logo no topo, faixa azul, rodapé do Netbug.
-async function pdfCriarBase(tituloDoc, rotuloDireita) {
+// Marca do documento: clientes da carteira ORVYN saem com a identidade da agência.
+function marcaPdfDoCliente(client) { return client && client.origem === 'orvyn' ? 'orvyn' : 'pessoal'; }
+const ORVYN_SLOGAN = 'O mundo digital, já viu o suficiente!';
+
+async function pdfCriarBase(tituloDoc, rotuloDireita, opcoes = {}) {
+  const orvyn = opcoes.marca === 'orvyn';
   if (typeof PDFLib === 'undefined') throw new Error('A biblioteca pdf-lib não carregou. Confira sua internet.');
   const { PDFDocument, StandardFonts, rgb } = PDFLib;
   const doc = await PDFDocument.create();
   doc.setTitle(tituloDoc);
-  doc.setAuthor('Dalton Neres | Developer');
+  doc.setAuthor(orvyn ? 'ORVYN Studio' : 'Dalton Neres | Developer');
   const W = 595.28, H = 841.89, M = 48;
   const page = doc.addPage([W, H]);
   const f = {
@@ -429,16 +434,24 @@ async function pdfCriarBase(tituloDoc, rotuloDireita) {
     bold: await doc.embedFont(StandardFonts.HelveticaBold),
     mono: await doc.embedFont(StandardFonts.Courier)
   };
-  const cor = {
+  // Paleta ORVYN: lavanda #A78BFA, tinta #1C1338, verde #B7FF44, claro #E8E5F0.
+  // Texto em destaque usa um lavanda escuro (#6A51B1) porque o lavanda puro fica fraco sobre branco.
+  const cor = orvyn ? {
+    azul: rgb(106 / 255, 81 / 255, 177 / 255), tinta: rgb(28 / 255, 19 / 255, 56 / 255), suave: rgb(0.44, 0.40, 0.53),
+    fundo: rgb(232 / 255, 229 / 255, 240 / 255), linha: rgb(0.85, 0.83, 0.91), alerta: rgb(0.99, 0.95, 0.85), alertaBorda: rgb(0.86, 0.63, 0.14),
+    barra: rgb(167 / 255, 139 / 255, 250 / 255), lima: rgb(183 / 255, 255 / 255, 68 / 255)
+  } : {
     azul: rgb(5 / 255, 89 / 255, 245 / 255), tinta: rgb(0.09, 0.10, 0.13), suave: rgb(0.38, 0.42, 0.48),
     fundo: rgb(0.955, 0.965, 0.98), linha: rgb(0.85, 0.87, 0.91), alerta: rgb(0.99, 0.95, 0.85), alertaBorda: rgb(0.86, 0.63, 0.14)
   };
-  const logoResp = await fetch('images/dalton-neres-colorida.png');
-  if (!logoResp.ok) throw new Error('Não consegui carregar a logo (images/dalton-neres-colorida.png).');
+  const logoArq = orvyn ? 'images/orvyn-logo-contract.png' : 'images/dalton-neres-colorida.png';
+  const logoResp = await fetch(logoArq);
+  if (!logoResp.ok) throw new Error(`Não consegui carregar a logo (${logoArq}).`);
   const logo = await doc.embedPng(await logoResp.arrayBuffer());
-  const lw = 190, lh = lw * logo.height / logo.width;
+  const lw = orvyn ? 150 : 190, lh = lw * logo.height / logo.width;
   const topoY = H - M - lh;
-  page.drawRectangle({ x: 0, y: H - 10, width: W, height: 10, color: cor.azul });
+  page.drawRectangle({ x: 0, y: H - 10, width: W, height: 10, color: orvyn ? cor.barra : cor.azul });
+  if (orvyn) page.drawRectangle({ x: 0, y: H - 14, width: 96, height: 4, color: cor.lima });
   page.drawImage(logo, { x: M, y: topoY - 8, width: lw, height: lh });
   const rot = pdfSeguro(rotuloDireita);
   page.drawText(rot, { x: W - M - f.bold.widthOfTextAtSize(rot, 11), y: topoY + lh - 14, size: 11, font: f.bold, color: cor.azul });
@@ -446,14 +459,19 @@ async function pdfCriarBase(tituloDoc, rotuloDireita) {
   page.drawText(em, { x: W - M - f.reg.widthOfTextAtSize(em, 8.5), y: topoY + lh - 28, size: 8.5, font: f.reg, color: cor.suave });
   page.drawLine({ start: { x: M, y: topoY - 20 }, end: { x: W - M, y: topoY - 20 }, thickness: 0.8, color: cor.linha });
 
+  const rodapeTexto = orvyn ? 'Documento emitido pela ORVYN Studio.' : 'Documento gerado automaticamente pelo ' + NETBUG_ASSINATURA + '.';
   function rodape(textoExtra) {
     page.drawLine({ start: { x: M, y: 70 }, end: { x: W - M, y: 70 }, thickness: 0.6, color: cor.linha });
-    const t1 = pdfSeguro('Documento gerado automaticamente pelo ' + NETBUG_ASSINATURA + '.');
+    const t1 = pdfSeguro(rodapeTexto);
     page.drawText(t1, { x: M, y: 54, size: 8.5, font: f.reg, color: cor.suave });
+    if (orvyn) {
+      const sl = pdfSeguro(ORVYN_SLOGAN);
+      page.drawText(sl, { x: W - M - f.bold.widthOfTextAtSize(sl, 8.5), y: 42, size: 8.5, font: f.bold, color: cor.azul });
+    }
     if (textoExtra) page.drawText(pdfSeguro(textoExtra), { x: M, y: 42, size: 8.5, font: f.reg, color: cor.suave });
   }
   const texto = (t, x, y, size, font, color) => page.drawText(pdfSeguro(t), { x, y, size, font, color });
-  return { doc, page, f, cor, W, H, M, yInicio: topoY - 20, rodape, texto, rgb };
+  return { doc, page, f, cor, W, H, M, yInicio: topoY - 20, rodape, texto, rgb, orvyn, rodapeTexto };
 }
 
 // ======================================================================
@@ -467,7 +485,7 @@ async function gerarCobrancaPDF(chargeId) {
   const settings = getSettings();
   const recorrente = clienteEhRecorrente(charge, client);
   const valor = Number(charge.valor) || 0;
-  const { doc, page, f, cor, W, M, yInicio, rodape, texto } = await pdfCriarBase(`Cobrança — ${nomeCliente}`, 'COBRANÇA');
+  const { doc, page, f, cor, W, M, yInicio, rodape, texto } = await pdfCriarBase(`Cobrança — ${nomeCliente}`, 'COBRANÇA', { marca: marcaPdfDoCliente(client) });
   const largura = W - 2 * M;
   let y = yInicio - 34;
 
@@ -586,7 +604,7 @@ async function montarReciboPDF(chargeId) {
   const client = charge.clientId ? clientById(charge.clientId) : null;
   const nomeCliente = client ? client.nome : (charge.avulsoNome || 'Cliente avulso');
   const settings = getSettings();
-  const { doc, page, f, cor, W, M, yInicio, rodape, texto } = await pdfCriarBase(`Recibo — ${nomeCliente}`, 'RECIBO DE PAGAMENTO');
+  const { doc, page, f, cor, W, M, yInicio, rodape, texto, orvyn } = await pdfCriarBase(`Recibo — ${nomeCliente}`, 'RECIBO DE PAGAMENTO', { marca: marcaPdfDoCliente(client) });
   const largura = W - 2 * M;
   const valor = Number(charge.valor) || 0;
   const numero = String(charge.id || '').slice(-6).toUpperCase() || '000000';
@@ -624,7 +642,7 @@ async function montarReciboPDF(chargeId) {
   const titular = settings.pixTitular || PIX_TITULAR_PADRAO;
   page.drawLine({ start: { x: M, y }, end: { x: M + 240, y }, thickness: 0.7, color: cor.suave });
   texto(titular, M, y - 14, 11, f.bold, cor.tinta);
-  texto('Dalton Neres | Developer', M, y - 28, 9.5, f.reg, cor.suave);
+  texto(orvyn ? 'ORVYN Studio' : 'Dalton Neres | Developer', M, y - 28, 9.5, f.reg, cor.suave);
 
   rodape(`Recibo emitido em ${formatDateBR(todayISO())}.`);
   const bytes = await doc.save();
@@ -5367,13 +5385,14 @@ async function gerarRelatorioMelhoriaPDF(ticketId) {
   const t = getTickets().find(x => x.id === ticketId);
   if (!t) throw new Error('Ticket não encontrado.');
   const cli = clientById(t.clienteId) || { nome: 'Cliente' };
-  const { doc, page, f, cor, W, H, M, yInicio, rodape, texto } = await pdfCriarBase(`Relatório de melhoria — ${t.numero}`, 'RELATÓRIO DE MELHORIA');
+  const { doc, page, f, cor, W, H, M, yInicio, rodape, texto, orvyn, rodapeTexto } = await pdfCriarBase(`Relatório de melhoria — ${t.numero}`, 'RELATÓRIO DE MELHORIA', { marca: marcaPdfDoCliente(cli) });
   const largura = W - 2 * M;
   let pg = page, y = yInicio - 34;
   const T = (txt, x, yy, size, font, color) => pg.drawText(pdfSeguro(txt), { x, y: yy, size, font, color });
   const rodapeExtra = (p) => {
     p.drawLine({ start: { x: M, y: 70 }, end: { x: W - M, y: 70 }, thickness: 0.6, color: cor.linha });
-    p.drawText(pdfSeguro('Documento gerado automaticamente pelo ' + NETBUG_ASSINATURA + '.'), { x: M, y: 54, size: 8.5, font: f.reg, color: cor.suave });
+    p.drawText(pdfSeguro(rodapeTexto), { x: M, y: 54, size: 8.5, font: f.reg, color: cor.suave });
+    if (orvyn) { const sl = pdfSeguro(ORVYN_SLOGAN); p.drawText(sl, { x: W - M - f.bold.widthOfTextAtSize(sl, 8.5), y: 42, size: 8.5, font: f.bold, color: cor.azul }); }
   };
   const garantir = (altura) => {
     if (y - altura < 90) { pg = doc.addPage([W, H]); rodapeExtra(pg); y = H - M; }
@@ -6229,7 +6248,7 @@ function renderOrvyn() {
           <i>Entrar na área <b>→</b></i>
         </button>
       </div>
-      <footer class="orvyn-footer"><span>ORVYN STUDIO</span><span>O mundo já viu o suficiente.</span></footer>
+      <footer class="orvyn-footer"><span>ORVYN STUDIO</span><span>O mundo digital, já viu o suficiente!</span></footer>
     </section>`;
 
   qs('#orvynAbrirFinanceiro').onclick = () => { _orvynSubpage = 'finance'; renderOrvyn(); };
@@ -6246,7 +6265,7 @@ function renderOrvynFinance() {
       <button class="orvyn-btn orvyn-btn-light" id="orvynVoltarInicio" style="margin:0 0 12px;">← Início ORVYN</button>
       ${financeWalletSwitch('orvyn')}
       <header class="orvyn-hero">
-        <div class="orvyn-brand-lockup"><img class="orvyn-logo" src="images/orvyn-logo.png" alt="ORVYN — O mundo já viu o suficiente."></div>
+        <div class="orvyn-brand-lockup"><img class="orvyn-logo" src="images/orvyn-logo.png" alt="ORVYN — O mundo digital, já viu o suficiente!"></div>
         <div class="orvyn-hero-copy"><span class="orvyn-eyebrow">FINANCEIRO · AGÊNCIA</span><h1>Studio</h1><p>Recebimentos, despesas e repasses da operação ORVYN.</p></div>
         <div class="orvyn-share-pill"><strong>${t.percentual}%</strong><span>parte do sócio<br>sobre o recebido</span></div>
       </header>
@@ -6277,7 +6296,7 @@ function renderOrvynFinance() {
         ].sort((a,b) => String(b.data || '').localeCompare(String(a.data || ''))).map(x => { const cliente = getClients().find(c => c.id === x.clientId); const despesa = x.kind === 'expense'; return `<div class="orvyn-ledger-row"><span class="orvyn-ledger-symbol ${despesa ? 'is-out' : x.status === 'recebido' ? 'is-in' : 'is-pending'}">${despesa ? '−' : x.status === 'recebido' ? '+' : '·'}</span><div class="orvyn-ledger-desc"><strong>${escapeHtml(x.descricao || (despesa ? 'Saída da agência' : 'Recebimento'))}</strong><span>${escapeHtml(cliente?.nome || (despesa ? 'Despesa ORVYN' : 'Cliente não informado'))} · ${formatDateBR(x.data)}</span></div><span class="orvyn-ledger-status ${despesa ? 'is-out' : x.status === 'recebido' ? 'is-paid' : 'is-pending'}">${despesa ? 'Saída' : x.status === 'recebido' ? 'Recebido' : 'Pendente'}</span><strong class="orvyn-ledger-amount ${despesa ? 'is-out' : ''}">${despesa ? '− ' : ''}${formatCurrency(x.valor)}</strong>${!despesa && x.status !== 'recebido' ? `<button class="orvyn-small-action" data-orvyn-mark-payment="${escapeHtml(x.id)}">Confirmar</button>` : ''}<button class="orvyn-small-action is-delete" data-orvyn-delete-entry="${escapeHtml(x.id)}" data-orvyn-kind="${x.kind}">Remover</button></div>`; }).join('')}</div>` : `<div class="orvyn-empty orvyn-empty-compact"><strong>Nenhuma movimentação por enquanto.</strong><p>Lance recebimentos de clientes para acompanhar automaticamente a participação do sócio.</p></div>`}
       </section>
       ${o.transfers.length ? `<section class="orvyn-panel orvyn-transfers-panel"><div class="orvyn-panel-head"><div><span class="orvyn-kicker">HISTÓRICO</span><h2>Repasses registrados</h2></div></div><div class="orvyn-ledger">${o.transfers.slice().sort((a,b) => String(b.data).localeCompare(String(a.data))).map(x => `<div class="orvyn-ledger-row"><span class="orvyn-ledger-symbol is-transfer">↗</span><div class="orvyn-ledger-desc"><strong>Repasse ao sócio</strong><span>${escapeHtml(x.nota || 'Participação ORVYN')} · ${formatDateBR(x.data)}</span></div><span class="orvyn-ledger-status is-paid">Registrado</span><strong class="orvyn-ledger-amount">${formatCurrency(x.valor)}</strong></div>`).join('')}</div></section>` : ''}
-      <footer class="orvyn-footer"><span>ORVYN STUDIO</span><span>O mundo já viu o suficiente.</span></footer>
+      <footer class="orvyn-footer"><span>ORVYN STUDIO</span><span>O mundo digital, já viu o suficiente!</span></footer>
     </section>`;
 
   wireFinanceWalletSwitch();
@@ -7106,11 +7125,12 @@ async function gerarContratoDocx(registro) {
     });
     doc.render(dados);
     const pacote = doc.getZip();
-    const logoResp = await fetch('images/dalton-neres-colorida.png');
+    const logoOrvyn = contratoUsaOrvyn(registro);
+    const logoResp = await fetch(logoOrvyn ? 'images/orvyn-logo-contract.png' : 'images/dalton-neres-colorida.png');
     if (!logoResp.ok) throw new Error('Não consegui carregar a logo para inserir no contrato.');
-    pacote.file('word/media/dalton-neres-logo.png', new Uint8Array(await logoResp.arrayBuffer()));
+    pacote.file('word/media/contrato-logo.png', new Uint8Array(await logoResp.arrayBuffer()));
     const largura = 1371600; // 1,5 pol em EMU
-    const altura = 265190; // mantém a proporção da logomarca horizontal
+    const altura = logoOrvyn ? 367700 : 265190; // mantém a proporção de cada logomarca horizontal
     const paragrafoLogo = `<w:p><w:pPr><w:jc w:val="right"/><w:spacing w:after="120"/></w:pPr><w:r><w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${largura}" cy="${altura}"/><wp:docPr id="1" name="Dalton Neres Developer"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="Dalton Neres Developer"/><pic:cNvPicPr><a:picLocks noChangeAspect="1"/></pic:cNvPicPr></pic:nvPicPr><pic:blipFill><a:blip r:embed="rId8"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${largura}" cy="${altura}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
     let documentXml = pacote.file('word/document.xml').asText();
     documentXml = documentXml.replace('<w:body>', '<w:body>' + paragrafoLogo);

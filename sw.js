@@ -9,7 +9,7 @@
    (ativado em firebase-config.js com enablePersistence).
    ======================================================= */
 
-const CACHE_NAME = 'caixa-aberto-v20';
+const CACHE_NAME = 'caixa-aberto-v21';
 
 const APP_SHELL = [
   './',
@@ -24,6 +24,7 @@ const APP_SHELL = [
   './images/icon-512-maskable.png',
   './images/orvyn-logo.png',
   './images/orvyn-logo-contract.png',
+  './images/orvyn-simbolo-escuro.png',
   './images/dalton-neres-colorida.png',
   './images/dalton-neres-branca.png'
 ];
